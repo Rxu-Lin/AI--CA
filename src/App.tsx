@@ -67,6 +67,7 @@ import brandLogo from './assets/brand-logo.png'
 import promptLibraryMarkdown from '../提示词.md?raw'
 import UnifiedRange from './UnifiedRange'
 import './App.css'
+import './ControlTheme.css'
 import { generationPromptText, migrateLegacyPromptNodes, whiteModelAnimationPrompt } from './workflowPrompts'
 import { canvasMediaClipboardType, createCanvasMediaClipboard, createDraggedMediaNodes, createPastedMediaNodes, mediaDataForCopy, parseCanvasMediaClipboard, serializeCanvasMediaClipboard, type CanvasMediaClipboard } from './canvasMediaClipboard'
 import {
@@ -214,6 +215,7 @@ type ApiMartVideoModelOption = {
   minDuration: number
   maxDuration: number
   defaultDuration: number
+  maxReferenceImages: number
   maxReferenceVideos: number
 }
 
@@ -373,6 +375,34 @@ function isVideoInputHandle(handleId?: string | null) {
   return videoInputHandleIndex(handleId) !== null
 }
 
+function videoInputLimitError(nodeId: string, handleId: string | null | undefined, edgeValues: Edge[], model: ApiMartVideoModelOption) {
+  const imageIndex = imageInputHandleIndex(handleId)
+  const videoIndex = videoInputHandleIndex(handleId)
+  const index = imageIndex ?? videoIndex
+  if (index === null) return null
+  const maximum = imageIndex !== null ? model.maxReferenceImages : model.maxReferenceVideos
+  const count = edgeValues.filter((edge) => edge.target === nodeId && (imageIndex !== null
+    ? isImageInputHandle(edge.targetHandle) : isVideoInputHandle(edge.targetHandle))).length
+  if (index > maximum || count >= maximum) {
+    return `${model.label} 最多支持 ${maximum} ${imageIndex !== null ? '张参考图' : '个参考视频'}。`
+  }
+  return null
+}
+
+function referenceInputSlots(connectedIndexes: Set<number>, prefix: string, maximum = Infinity) {
+  const count = Math.min(maximum, Math.max(1, Math.max(0, ...connectedIndexes) + 1))
+  return Array.from({ length: count }, (_, index) => ({
+    id: `${prefix}${index + 1}`, index: index + 1, connected: connectedIndexes.has(index + 1),
+  }))
+}
+
+function limitVideoInputEdges(edgeValues: Edge[], nodeValues: WorkflowNode[], nodeId: string, model: ApiMartVideoModelOption) {
+  return normalizeImageInputEdges(edgeValues, nodeValues).filter((edge) => edge.target !== nodeId || (
+    (imageInputHandleIndex(edge.targetHandle) ?? 0) <= model.maxReferenceImages &&
+    (videoInputHandleIndex(edge.targetHandle) ?? 0) <= model.maxReferenceVideos
+  ))
+}
+
 function normalizeImageInputEdges(edgeValues: Edge[], nodeValues: WorkflowNode[]) {
   const imageTargetIds = nodeValues
     .filter((node) => node.data.kind === 'image' || node.data.kind === 'video')
@@ -387,7 +417,7 @@ function normalizeImageInputEdges(edgeValues: Edge[], nodeValues: WorkflowNode[]
       .filter(
         ({ edge, handleIndex }) =>
           edge.target === targetId &&
-          (handleIndex !== null || (!edge.targetHandle && sourceKindById.get(edge.source) !== 'prompt')),
+          (handleIndex !== null || (!edge.targetHandle && sourceKindById.get(edge.source) !== 'prompt' && sourceKindById.get(edge.source) !== 'video-reference')),
       )
       .sort((left, right) => {
         if (left.handleIndex !== null && right.handleIndex !== null && left.handleIndex !== right.handleIndex) {
@@ -735,6 +765,14 @@ const apiMartModels: ApiMartModelOption[] = [
     maxReferenceImages: 14,
   },
   {
+    id: 'gemini-nano-banana-2.1',
+    label: 'Nano Banana 2.1',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+    // Website reference limit; API Mart does not document a fixed count.
+    maxReferenceImages: 14,
+  },
+  {
     id: 'gpt-image-2',
     label: 'GPT Image 2',
     resolutions: ['1K', '2K', '4K'],
@@ -788,6 +826,7 @@ const apiMartVideoModels: ApiMartVideoModelOption[] = [
     minDuration: 4,
     maxDuration: 30,
     defaultDuration: 5,
+    maxReferenceImages: 30,
     maxReferenceVideos: 10,
   },
   {
@@ -798,6 +837,7 @@ const apiMartVideoModels: ApiMartVideoModelOption[] = [
     minDuration: 4,
     maxDuration: 15,
     defaultDuration: 5,
+    maxReferenceImages: 9,
     maxReferenceVideos: 3,
   },
   {
@@ -808,6 +848,18 @@ const apiMartVideoModels: ApiMartVideoModelOption[] = [
     minDuration: 4,
     maxDuration: 15,
     defaultDuration: 5,
+    maxReferenceImages: 9,
+    maxReferenceVideos: 0,
+  },
+  {
+    id: 'muse-video-ext',
+    label: 'Muse Video',
+    resolutions: ['720p'],
+    defaultResolution: '720p',
+    minDuration: 10,
+    maxDuration: 10,
+    defaultDuration: 10,
+    maxReferenceImages: 9,
     maxReferenceVideos: 0,
   },
 ]
@@ -2380,6 +2432,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
     ? data.imageSize
     : data.imageSize || imageModelConfig.defaultResolution
   const videoModelConfig = findApiMartVideoModel(configuredModelName)
+  const isMuseVideo = isVideo && videoModelConfig.id === 'muse-video-ext'
   const selectedVideoResolution = data.videoResolution && videoModelConfig.resolutions.includes(data.videoResolution)
     ? data.videoResolution
     : videoModelConfig.defaultResolution
@@ -3120,7 +3173,8 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
           </div>
           <label className="generation-setting">
             <span>画面比例</span>
-            <select aria-label={isVideo ? '视频画面比例' : '图像画面比例'} value={selectedAspectRatio.size} disabled={isGenerating} onChange={(event) => data.onChangeSize?.(nodeId, event.target.value)}>
+            <select aria-label={isVideo ? '视频画面比例' : '图像画面比例'} value={isMuseVideo && data.size === 'auto' ? 'auto' : selectedAspectRatio.size} disabled={isGenerating} onChange={(event) => data.onChangeSize?.(nodeId, event.target.value)}>
+              {isMuseVideo && <option value="auto">自动（跟随参考图）</option>}
               {aspectRatioOptions.map((option) => <option key={option.size} value={option.size}>{option.label}</option>)}
             </select>
           </label>
@@ -3129,7 +3183,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             <select
               aria-label={isVideo ? '视频像素大小' : '图像输出清晰度'}
               value={isVideo ? selectedVideoResolution : selectedImageSize}
-              disabled={isGenerating || (!isVideo && imageResolutionOptions.length < 2)}
+              disabled={isGenerating || (isVideo ? videoModelConfig.resolutions.length < 2 : imageResolutionOptions.length < 2)}
               onChange={(event) => isVideo ? data.onChangeVideoResolution?.(nodeId, event.target.value as VideoResolutionTier) : data.onChangeImageSize?.(nodeId, event.target.value as ImageResolutionTier)}
             >
               {(isVideo ? videoModelConfig.resolutions : imageResolutionOptions.length ? imageResolutionOptions : [selectedImageSize]).map((resolution) => <option key={resolution} value={resolution}>{resolution}</option>)}
@@ -3152,13 +3206,16 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
           <div className="generation-panel-footer">
             <label className="generation-duration-setting">
               <span>时长 <strong>{selectedVideoDuration} 秒</strong></span>
-              <UnifiedRange min={videoModelConfig.minDuration} max={videoModelConfig.maxDuration} step={1} value={selectedVideoDuration} onValueChange={(duration) => data.onChangeVideoDuration?.(nodeId, duration)} disabled={isGenerating} aria-label={'视频生成时长 ' + selectedVideoDuration + ' 秒'} />
+              {videoModelConfig.minDuration === videoModelConfig.maxDuration
+                ? <span className="generation-panel-hint">固定 · 有声</span>
+                : <UnifiedRange min={videoModelConfig.minDuration} max={videoModelConfig.maxDuration} step={1} value={selectedVideoDuration} onValueChange={(duration) => data.onChangeVideoDuration?.(nodeId, duration)} disabled={isGenerating} aria-label={'视频生成时长 ' + selectedVideoDuration + ' 秒'} />}
             </label>
             <button className="generation-submit generation-submit-run" type="button" onClick={() => data.onGenerate?.(nodeId)} disabled={isGenerating} aria-label={isGenerating ? '正在生成' : '运行视频生成'} title={isGenerating ? '正在生成' : '运行视频生成'}>
               {isGenerating ? <Loader2 size={15} className="export-spinner" /> : 'Run'}
             </button>
           </div>
         )}
+        {isMuseVideo && <p className="generation-panel-hint">最多 9 张参考图 · 原始大小合计 ≤ 11 MiB · 不支持参考视频</p>}
       </section>
     )}
     </div>
@@ -3388,6 +3445,11 @@ export default function App() {
       const targetsImageInput = isImageInputHandle(connection.targetHandle)
       const targetsVideoInput = isVideoInputHandle(connection.targetHandle)
 
+      if (targetNode?.data.kind === 'video') {
+        const error = videoInputLimitError(targetNode.id, connection.targetHandle, edges, findApiMartVideoModel(targetNode.data.model || apiConfig.videoModel))
+        if (error) { setToast(error); return }
+      }
+
       if (sourceNode?.data.kind === 'prompt' || connection.targetHandle === 'prompt') {
         setToast('提示词请直接填写在生成框下方。')
         return
@@ -3453,7 +3515,7 @@ export default function App() {
       }
       markDirty()
     },
-    [markDirty, nodes, setEdges, setNodes],
+    [apiConfig.videoModel, edges, markDirty, nodes, setEdges, setNodes],
   )
 
   const updateNodeData = useCallback(
@@ -3750,7 +3812,7 @@ export default function App() {
     (nodeId: string, size: string) => {
       const ratio = getAspectRatioOption(size)
       updateNodeData(nodeId, { size })
-      setToast(`尺寸比例已设为 ${ratio.label}（${size}）。`)
+      setToast(size === 'auto' ? '画面比例已设为自动：有图时跟随参考图，纯文字生成默认 16:9。' : `尺寸比例已设为 ${ratio.label}（${size}）。`)
     },
     [updateNodeData],
   )
@@ -3782,27 +3844,26 @@ export default function App() {
   const changeNodeVideoModel = useCallback(
     (nodeId: string, modelId: string) => {
       const model = findApiMartVideoModel(modelId)
-      setEdges((current) => normalizeImageInputEdges(
-        current.filter((edge) => {
-          if (edge.target !== nodeId || !isVideoInputHandle(edge.targetHandle)) return true
-          const index = videoInputHandleIndex(edge.targetHandle) || 1
-          return index <= model.maxReferenceVideos
-        }),
-        nodes,
-      ))
+      const node = nodes.find((item) => item.id === nodeId)
+      const requirements = node?.data.referenceRequirements
+      const limitedEdges = limitVideoInputEdges(edges, nodes, nodeId, model)
+      const removedCount = edges.length - limitedEdges.length
+      setEdges((current) => limitVideoInputEdges(current, nodes, nodeId, model))
       updateNodeData(nodeId, {
         model: model.id,
         videoResolution: model.defaultResolution,
         videoDuration: model.defaultDuration,
+        ...(model.id !== 'muse-video-ext' && node?.data.size === 'auto'
+          ? { size: '1536x864' } : {}),
+        ...(requirements && (requirements.images > model.maxReferenceImages || requirements.videos > model.maxReferenceVideos)
+          ? { referenceRequirements: undefined } : {}),
         error: undefined,
       })
       setToast(
-        model.maxReferenceVideos
-          ? `视频模型已切换为 ${model.label}，可连接参考视频。`
-          : `视频模型已切换为 ${model.label}；该模型不显示参考视频接口。`,
+        `视频模型已切换为 ${model.label}，最多 ${model.maxReferenceImages} 张参考图${model.maxReferenceVideos ? `、${model.maxReferenceVideos} 个参考视频` : '，不支持参考视频'}。${removedCount ? `已断开 ${removedCount} 条超限或不支持的连线，原素材节点保留。` : ''}`,
       )
     },
-    [nodes, setEdges, updateNodeData],
+    [edges, nodes, setEdges, updateNodeData],
   )
 
   const changeNodeVideoResolution = useCallback(
@@ -4147,6 +4208,10 @@ export default function App() {
       const createsReference = isImageInputHandle(targetHandleId)
       const createsReferenceVideo = isVideoInputHandle(targetHandleId)
       if (!createsReference && !createsReferenceVideo) return
+      if (targetNode.data.kind === 'video') {
+        const error = videoInputLimitError(targetNode.id, targetHandleId, edges, findApiMartVideoModel(targetNode.data.model || apiConfig.videoModel))
+        if (error) { setToast(error); return }
+      }
 
       const createdAt = new Date().toLocaleString('zh-CN')
       const inputNodeId = id(createsReferenceVideo ? 'video-ref' : 'ref')
@@ -4201,7 +4266,7 @@ export default function App() {
           : '已拖出并连接空白参考图节点，请上传图片。',
       )
     },
-    [apiConfig.size, markDirty, nodes, setEdges, setNodes],
+    [apiConfig.size, apiConfig.videoModel, edges, markDirty, nodes, setEdges, setNodes],
   )
 
   const handleConnectStart = useCallback<OnConnectStart>((_, params) => {
@@ -4427,29 +4492,17 @@ export default function App() {
     const connectedImageIndexes = new Set(
       imageInputEdges.map((edge, index) => imageInputHandleIndex(edge.targetHandle) ?? index + 1),
     )
-    const highestConnectedImageIndex = Math.max(0, ...connectedImageIndexes)
     const usesOrderedImageSlots = node.data.kind === 'image' || node.data.kind === 'video'
-    const visibleImageSlotCount = usesOrderedImageSlots ? Math.max(1, highestConnectedImageIndex + 1) : 1
-    const imageInputSlots = Array.from({ length: visibleImageSlotCount }, (_, index) => ({
-      id: usesOrderedImageSlots ? `${imageInputHandlePrefix}${index + 1}` : 'image',
-      index: index + 1,
-      connected: connectedImageIndexes.has(index + 1),
-    }))
-    const connectedVideoIndexes = new Set(
-      videoInputEdges.map((edge, index) => videoInputHandleIndex(edge.targetHandle) ?? index + 1),
-    )
-    const highestConnectedVideoIndex = Math.max(0, ...connectedVideoIndexes)
     const videoModel = node.data.kind === 'video'
       ? findApiMartVideoModel(node.data.model || apiConfig.videoModel)
       : null
-    const visibleVideoSlotCount = videoModel?.maxReferenceVideos
-      ? Math.min(videoModel.maxReferenceVideos, Math.max(1, highestConnectedVideoIndex + 1))
-      : 0
-    const videoInputSlots = Array.from({ length: visibleVideoSlotCount }, (_, index) => ({
-      id: `${videoInputHandlePrefix}${index + 1}`,
-      index: index + 1,
-      connected: connectedVideoIndexes.has(index + 1),
-    }))
+    const imageInputSlots = usesOrderedImageSlots
+      ? referenceInputSlots(connectedImageIndexes, imageInputHandlePrefix, videoModel?.maxReferenceImages)
+      : [{ id: 'image', index: 1, connected: connectedImageIndexes.has(1) }]
+    const connectedVideoIndexes = new Set(
+      videoInputEdges.map((edge, index) => videoInputHandleIndex(edge.targetHandle) ?? index + 1),
+    )
+    const videoInputSlots = referenceInputSlots(connectedVideoIndexes, videoInputHandlePrefix, videoModel?.maxReferenceVideos ?? 0)
     const promptMentionOptions = node.data.kind === 'image' || node.data.kind === 'video'
       ? promptMentionOptionsForNode(node.id, nodes, edges)
       : undefined
@@ -4735,6 +4788,10 @@ export default function App() {
     const videoDuration = Number.isFinite(requestedVideoDuration)
       ? Math.min(videoModel.maxDuration, Math.max(videoModel.minDuration, Math.round(requestedVideoDuration)))
       : videoModel.defaultDuration
+    if (referenceImageUrls.length > videoModel.maxReferenceImages) {
+      updateNodeData(nodeId, { status: 'error', error: `${videoModel.label} 最多支持 ${videoModel.maxReferenceImages} 张参考图。` })
+      return
+    }
     if (referenceVideoUrls.length > videoModel.maxReferenceVideos) {
       updateNodeData(nodeId, {
         status: 'error',

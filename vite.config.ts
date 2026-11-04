@@ -1516,6 +1516,13 @@ const apiMartModelConfigs: Record<
     defaultResolution: '1K',
     maxReferenceImages: 14,
   },
+  'gemini-nano-banana-2.1': {
+    label: 'Nano Banana 2.1',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+    // Website safety limit, not an upstream image count constraint.
+    maxReferenceImages: 14,
+  },
   'gpt-image-2': {
     label: 'GPT Image 2',
     resolutions: ['1K', '2K', '4K'],
@@ -1600,6 +1607,16 @@ const apiMartVideoModelConfigs: Record<
     minDuration: 4,
     maxDuration: 15,
     defaultDuration: 5,
+    maxReferenceImages: 9,
+    maxReferenceVideos: 0,
+  },
+  'muse-video-ext': {
+    label: 'Muse Video',
+    resolutions: ['720p'],
+    defaultResolution: '720p',
+    minDuration: 10,
+    maxDuration: 10,
+    defaultDuration: 10,
     maxReferenceImages: 9,
     maxReferenceVideos: 0,
   },
@@ -1972,6 +1989,23 @@ async function uploadApiMartReferenceVideo(
   return uploadedUrl
 }
 
+async function prepareMuseVideoReferenceImages(imageUrls: string[]) {
+  const maxBytes = 11 * 1024 * 1024
+  const prepared: string[] = []
+  let totalBytes = 0
+  for (const [index, url] of imageUrls.entries()) {
+    const image = await loadImageBuffer(url)
+    totalBytes += image.buffer.length
+    if (totalBytes > maxBytes) {
+      throw new UpstreamHttpError('Muse Video 参考图原始大小合计不能超过 11 MiB，请减少图片或压缩后重试。', 400)
+    }
+    validateReferenceImage(image, index)
+    // Send exactly the bytes checked, including downloaded public references.
+    prepared.push(dataUrlFromImage(image))
+  }
+  return prepared
+}
+
 async function requestApiMartVideo(
   config: ApiConfig,
   prompt: string,
@@ -1982,12 +2016,16 @@ async function requestApiMartVideo(
   const modelId = config.videoModel || 'seedance-2.5'
   const modelConfig = apiMartVideoModelConfigs[modelId]
   if (!modelConfig) throw new UpstreamHttpError('当前 API Mart 视频模型不在网站内置的可选列表中。', 400)
+  const isMuse = modelId === 'muse-video-ext'
+  if (isMuse && !prompt.trim()) throw new UpstreamHttpError('Muse Video 必须填写提示词。', 400)
 
   const aspectRatio = aspectRatioFromSize(config.size)
-  const supportedRatios = new Set(['16:9', '4:3', '1:1', '3:4', '9:16'])
+  const supportedRatios = new Set(isMuse
+    ? ['16:9', '3:2', '4:3', '1:1', '3:4', '2:3', '9:16', 'auto']
+    : ['16:9', '4:3', '1:1', '3:4', '9:16'])
   if (!supportedRatios.has(aspectRatio)) {
     throw new UpstreamHttpError(
-      `${modelConfig.label} 暂不支持 ${aspectRatio}，请选择 16:9、4:3、1:1、3:4 或 9:16。`,
+      `${modelConfig.label} 暂不支持 ${aspectRatio}，请选择 ${[...supportedRatios].join('、')}。`,
       400,
     )
   }
@@ -2006,7 +2044,7 @@ async function requestApiMartVideo(
   }
 
   const videoEndpoint = apiMartVideoEndpoint(config.endpoint.trim())
-  const preparedImages = await Promise.all(
+  const preparedImages = isMuse ? await prepareMuseVideoReferenceImages(referenceImageUrls) : await Promise.all(
     referenceImageUrls.map((imageUrl, index) =>
       uploadApiMartReferenceImage(config.endpoint.trim(), config.apiKey.trim(), imageUrl, index),
     ),
@@ -2029,13 +2067,19 @@ async function requestApiMartVideo(
     prompt,
     duration,
     resolution,
-    [modelId === 'MiniMax-H3' ? 'aspect_ratio' : 'size']: aspectRatio,
   }
-  if (modelId !== 'MiniMax-H3') payload.generate_audio = true
+  if (isMuse) {
+    payload.n = 1
+    if (aspectRatio !== 'auto') payload.aspect_ratio = aspectRatio
+  } else {
+    payload[modelId === 'MiniMax-H3' ? 'aspect_ratio' : 'size'] = aspectRatio
+    if (modelId !== 'MiniMax-H3') payload.generate_audio = true
+  }
   if (preparedImages.length) payload.image_urls = preparedImages
   if (preparedVideos.length) payload.video_urls = preparedVideos
 
-  const headers = { Authorization: `Bearer ${config.apiKey.trim()}` }
+  const headers: Record<string, string> = { Authorization: `Bearer ${config.apiKey.trim()}` }
+  if (isMuse) headers['Idempotency-Key'] = randomUUID()
   let created: unknown
   try {
     created = await postJson(videoEndpoint, headers, payload, '视频')
@@ -2047,26 +2091,25 @@ async function requestApiMartVideo(
   }
 
   const directUrl = apiMartVideoUrl(created)
-  if (directUrl) return { data: [{ url: directUrl }], apimart: created }
+  if (directUrl && (!isMuse || apiMartTaskStatus(created) === 'completed')) return { data: [{ url: directUrl }], apimart: created }
 
   const taskId = apiMartTaskId(created)
   if (!taskId) throw new Error(`API Mart 已响应，但没有返回视频任务 ID。响应：${compactJson(created)}`)
 
   const taskEndpoint = apiMartTaskEndpoint(videoEndpoint, taskId)
   for (let index = 0; index < 180; index += 1) {
-    await new Promise((resolve) => setTimeout(resolve, index === 0 ? 3000 : 5000))
+    await new Promise((resolve) => setTimeout(resolve, !isMuse && index === 0 ? 3000 : 5000))
     const result = await getJson(taskEndpoint, headers, '视频')
-    const videoUrl = apiMartVideoUrl(result)
-    if (videoUrl) return { data: [{ url: videoUrl }], apimart: result }
-
     const status = apiMartTaskStatus(result)
     if (status === 'failed' || status === 'cancelled' || status === 'canceled') {
       throw new Error(`API Mart 视频生成失败：${apiMartTaskError(result) || status}`)
     }
+    const videoUrl = apiMartVideoUrl(result)
+    if (videoUrl && (!isMuse || status === 'completed')) return { data: [{ url: videoUrl }], apimart: result }
     if (status === 'completed') throw new Error('API Mart 视频任务已完成，但响应中没有找到视频地址。')
   }
 
-  throw new Error(`API Mart 视频生成超时（任务 ${taskId}），请稍后重新生成。`)
+  throw new Error(`API Mart 视频等待超时（任务 ${taskId}），任务可能仍在处理，请在 API Mart 查询此任务，避免重复提交扣费。`)
 }
 
 async function proxyImageGeneration(body: { config?: ApiConfig; prompt?: string; referenceImageUrl?: string; referenceImageUrls?: string[]; maskUrl?: string }) {

@@ -1852,19 +1852,19 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
               </div>
               <div className="model3d-parametric-create-list">
                 <button className="model3d-parametric-create" type="button" onClick={() => createParametricBox()}>
-                  <span className="model3d-model-glyph parametric" style={{ '--model-card-color': '#8FD9EF' } as CSSProperties}>
+                  <span className="model3d-model-glyph parametric">
                     <Box size={22} />
                   </span>
                   <span><strong>参数化礼盒</strong><small>调整尺寸、壁厚与盒盖状态</small></span>
                   <Plus size={14} />
                 </button>
                 <button className="model3d-parametric-create" type="button" onClick={() => createParametricPrimitive(defaultCylinderSettings)}>
-                  <span className="model3d-model-glyph cylinder" style={{ '--model-card-color': '#AFC9D8' } as CSSProperties} aria-hidden="true" />
+                  <span className="model3d-model-glyph cylinder" aria-hidden="true" />
                   <span><strong>圆柱模型</strong><small>调整半径和高度</small></span>
                   <Plus size={14} />
                 </button>
                 <button className="model3d-parametric-create" type="button" onClick={() => createParametricPrimitive(defaultCuboidSettings)}>
-                  <span className="model3d-model-glyph cuboid" style={{ '--model-card-color': '#C9B9A9' } as CSSProperties}>
+                  <span className="model3d-model-glyph cuboid">
                     <Box size={21} />
                   </span>
                   <span><strong>方形模型</strong><small>调整长度、宽度和高度</small></span>

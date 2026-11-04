@@ -11,6 +11,7 @@ import {
   X,
 } from 'lucide-react'
 import './MultiAngleStudio.css'
+import UnifiedRange from './UnifiedRange'
 
 export type MultiAngleFraming = 'close' | 'medium' | 'wide'
 export type MultiAngleLens = 'standard' | 'fisheye' | 'tilted'
@@ -223,7 +224,7 @@ export default function MultiAngleStudio({ sourceImageUrl, sourceName, models, i
     const centerY = size / 2
     const radius = orbitRadius
     context.lineWidth = 1
-    context.strokeStyle = 'rgba(181, 197, 211, 0.52)'
+    context.strokeStyle = 'rgba(197, 197, 197, 0.52)'
     context.beginPath()
     context.arc(centerX, centerY, radius, 0, Math.PI * 2)
     context.stroke()
@@ -245,8 +246,8 @@ export default function MultiAngleStudio({ sourceImageUrl, sourceName, models, i
           started = true
         }
         curveContext.strokeStyle = emphasized
-          ? (front ? 'rgba(97, 199, 232, 0.5)' : 'rgba(97, 199, 232, 0.12)')
-          : (front ? 'rgba(181, 197, 211, 0.42)' : 'rgba(139, 154, 167, 0.14)')
+          ? (front ? 'rgba(218, 218, 218, 0.5)' : 'rgba(218, 218, 218, 0.12)')
+          : (front ? 'rgba(197, 197, 197, 0.42)' : 'rgba(154, 154, 154, 0.14)')
         curveContext.lineWidth = emphasized && front ? 1.25 : 1
         curveContext.setLineDash(front ? [] : [3, 4])
         curveContext.stroke()
@@ -272,7 +273,7 @@ export default function MultiAngleStudio({ sourceImageUrl, sourceName, models, i
     context.setLineDash([])
     const camera = getCameraPosition(view.horizontal, view.vertical)
     context.lineWidth = 1.2
-    context.strokeStyle = 'rgba(97, 199, 232, 0.48)'
+    context.strokeStyle = 'rgba(218, 218, 218, 0.48)'
     context.beginPath()
     context.moveTo(centerX, centerY)
     context.lineTo(camera.x, camera.y)
@@ -407,24 +408,24 @@ export default function MultiAngleStudio({ sourceImageUrl, sourceName, models, i
           <div className="multi-angle-controls">
             <label>
               <span>水平环绕</span>
-              <input type="range" min={-180} max={180} step={1} value={view.horizontal} disabled={submitting || busy} onChange={(event) => updateCustom({ horizontal: Number(event.target.value), lens: 'standard', roll: 0 })} />
+              <UnifiedRange aria-label="水平环绕" min={-180} max={180} step={1} value={view.horizontal} disabled={submitting || busy} onValueChange={(horizontal) => updateCustom({ horizontal, lens: 'standard', roll: 0 })} />
               <output>{degreeLabel(view.horizontal)}</output>
             </label>
             <label>
               <span>垂直俯仰</span>
-              <input type="range" min={-80} max={80} step={1} value={view.vertical} disabled={submitting || busy} onChange={(event) => updateCustom({ vertical: Number(event.target.value), lens: 'standard', roll: 0 })} />
+              <UnifiedRange aria-label="垂直俯仰" min={-80} max={80} step={1} value={view.vertical} disabled={submitting || busy} onValueChange={(vertical) => updateCustom({ vertical, lens: 'standard', roll: 0 })} />
               <output>{degreeLabel(view.vertical)}</output>
             </label>
             <label>
               <span>景别缩放</span>
-              <input
-                type="range"
+              <UnifiedRange
+                aria-label="景别缩放"
                 min={0}
                 max={2}
                 step={1}
                 value={framingOptions.findIndex((option) => option.value === view.framing)}
                 disabled={submitting || busy}
-                onChange={(event) => updateCustom({ framing: framingOptions[Number(event.target.value)]?.value || 'medium' })}
+                onValueChange={(value) => updateCustom({ framing: framingOptions[value]?.value || 'medium' })}
               />
               <output>{framing.label}</output>
             </label>

@@ -9,7 +9,7 @@ type UnifiedRangeProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'type' | 'm
 }
 
 export default function UnifiedRange({ min, max, value, onValueChange, className = '', ...props }: UnifiedRangeProps) {
-  const progress = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100))
+  const progress = max > min ? Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100)) : 0
   const style = { '--range-progress': `${progress}%` } as CSSProperties
 
   return (

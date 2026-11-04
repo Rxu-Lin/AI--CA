@@ -172,14 +172,18 @@ test('immediate submission errors preserve the upstream message', async () => {
   assert.equal(h.calls.length, 1)
 })
 
-test('existing Nano Banana requests still use the original API and task endpoint', async () => {
-  const h = harness([submitted, { data: { status: 'completed', result: { images: [{ url: ['https://cdn.example/nano.png'] }] } } }])
-  assert.equal((await h.run({ model: 'gemini-3-pro-image-preview', imageSize: '4K' })).data[0].url, 'https://cdn.example/nano.png')
-  assert.equal(h.calls[0].endpoint, config.endpoint)
-  assert.deepEqual(h.calls[0].payload, { model: 'gemini-3-pro-image-preview', prompt: '产品海报', size: '9:16', resolution: '4K', n: 1 })
-  assert.equal(h.calls[1].endpoint, 'https://api.apimart.ai/v1/tasks/task_mj_82?language=zh')
-  assert.deepEqual(h.waits, [1000])
-})
+for (const model of ['gemini-3-pro-image-preview', 'gemini-3.1-flash-image-preview', 'gemini-nano-banana-2.1']) {
+  test(`${model} submits references and retrieves images through the unified API`, async () => {
+    const h = harness([submitted, { data: { status: 'completed', result: { images: [{ url: ['https://cdn.example/nano.png'] }] } } }])
+    const refs = ['data:image/png;base64,aW1hZ2U=', 'https://example.com/ref.png']
+    assert.equal((await h.run({ model, imageSize: '4K' }, refs)).data[0].url, 'https://cdn.example/nano.png')
+    assert.equal(h.calls[0].endpoint, config.endpoint)
+    assert.deepEqual(h.calls[0].payload, { model, prompt: '产品海报', size: '9:16', resolution: '4K', n: 1, image_urls: refs })
+    assert.equal(h.calls[1].endpoint, 'https://api.apimart.ai/v1/tasks/task_mj_82?language=zh')
+    assert.deepEqual(h.waits, [1000])
+    assert.equal(h.uploads.length, 0, 'Nano Banana references do not require public URL uploads')
+  })
+}
 
 test('existing GPT Image 2.5 keeps public uploads, lowercase resolution and quality', async () => {
   const h = harness([{ data: [{ url: 'https://cdn.example/gpt.png' }] }])

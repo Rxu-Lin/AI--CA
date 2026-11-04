@@ -2,8 +2,8 @@
   font-family:
     Inter, "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", ui-sans-serif,
     system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  color: #f7f7fb;
-  background: #12141b;
+  color: #f7f7f7;
+  background: #141414;
   color-scheme: dark;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -25,5 +25,5 @@ body,
 
 body {
   overflow: hidden;
-  background: #12141b;
+  background: #141414;
 }
