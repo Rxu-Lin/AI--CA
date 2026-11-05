@@ -269,6 +269,8 @@ test('image and video show all generation controls in the active floating panel 
   const React = await import('react')
   const icons = await import('lucide-react')
   const { renderToStaticMarkup } = await import('react-dom/server')
+  const selectModule = vm.createContext({ require, exports: {} })
+  vm.runInContext(compile(readFileSync(new URL('../src/GenerationSelect.tsx', import.meta.url), 'utf8')), selectModule)
   const model = { id: 'test', label: 'test', resolutions: ['1K'], defaultResolution: '1K', minDuration: 1, maxDuration: 10, defaultDuration: 5, maxReferenceVideos: 1 }
   const aspectRatio = { value: '1:1', label: '1:1', size: '1024x1024', cssRatio: '1 / 1' }
   const context = helpers(['WorkflowCard', 'promptContainsMentionToken', 'activePromptMentions', 'parseImageSize'], {
@@ -278,6 +280,7 @@ test('image and video show all generation controls in the active floating panel 
     // React Flow supplies this context in the browser; render inert handles for the card test.
     Handle: ({ id, type }) => React.createElement('span', { 'data-handle': id, 'data-type': type }),
     UnifiedRange: ({ value, 'aria-label': label }) => React.createElement('input', { type: 'range', value, 'aria-label': label, readOnly: true }),
+    GenerationSelect: selectModule.exports.default,
     Position: { Left: 'left', Right: 'right' },
     getAspectRatioOption: () => aspectRatio, aspectRatioOptions: [aspectRatio],
     defaultApiConfig: { size: '1024x1024' },
@@ -307,6 +310,7 @@ test('image and video show all generation controls in the active floating panel 
     assert.match(panel, new RegExp(`aria-label="${kind === 'image' ? '图像' : '视频'}生成模型"`))
     assert.match(panel, /画面比例/)
     assert.match(panel, /清晰度/)
+    assert.equal((panel.match(/role="combobox"/g) || []).length, 3)
     assert.match(panel, /generation-submit/)
     assert.match(panel, /generation-submit-run/)
     assert.match(panel, />Run<\/button>/)
@@ -316,6 +320,7 @@ test('image and video show all generation controls in the active floating panel 
     }
     if (kind === 'video') assert.match(panel, /视频生成时长/)
     const busyHtml = renderToStaticMarkup(React.createElement(context.WorkflowCard, { ...props, data: { ...props.data, status: 'generating' } }))
+    assert.equal((busyHtml.match(/<button[^>]*role="combobox"[^>]*disabled=""/g) || []).length, 3)
     const busyButton = busyHtml.match(/<button class="generation-submit generation-submit-run"[^>]*>[\s\S]*?<\/button>/)?.[0]
     assert.ok(busyButton, 'generating keeps the same square Run button')
     assert.match(busyButton, /disabled=""/)

@@ -46,6 +46,7 @@ import {
   History,
   Image as ImageIcon,
   KeyRound,
+  Layers,
   Lightbulb,
   Loader2,
   Pencil,
@@ -66,6 +67,7 @@ import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent
 import brandLogo from './assets/brand-logo.png'
 import promptLibraryMarkdown from '../提示词.md?raw'
 import UnifiedRange from './UnifiedRange'
+import GenerationSelect from './GenerationSelect'
 import './App.css'
 import './ControlTheme.css'
 import { generationPromptText, migrateLegacyPromptNodes, whiteModelAnimationPrompt } from './workflowPrompts'
@@ -90,11 +92,16 @@ import {
 import { sketchGenerationInstruction, sketchSceneIds, type SketchDocument, type SketchModelOption } from './sketchDocument'
 import type { ElementEditOperation, ElementEditResult } from './ElementEditStudio'
 import type { MultiAngleModelOption, MultiAngleResult } from './MultiAngleStudio'
+import type { LayerSplitInput } from './LayerSplitStudio'
+import { renderLayerDocument, type LayerDocument, type LayerSplitJob, type RasterLayer } from './layerDocument'
+import { collectLayerSplit, layerRequest } from './layerSplitClient'
+import { mapFineDraftImages, type FineLayerDraft } from './fineLayerDocument'
 
 const Model3DStudio = lazy(() => import('./Model3DStudio'))
 const SketchStudio = lazy(() => import('./SketchStudio'))
 const ElementEditStudio = lazy(() => import('./ElementEditStudio'))
 const MultiAngleStudio = lazy(() => import('./MultiAngleStudio'))
+const LayerSplitStudio = lazy(() => import('./LayerSplitStudio'))
 
 type NodeKind = 'prompt' | 'image' | 'video' | 'reference' | 'video-reference' | 'repaint' | 'outpaint' | 'group'
 type NodeStatus = 'idle' | 'generating' | 'done' | 'error'
@@ -283,6 +290,10 @@ type WorkflowNodeData = {
   elementEditOperations?: ElementEditOperation[]
   elementEditRequestSize?: string
   multiAngleSettings?: MultiAngleResult
+  layerDocument?: LayerDocument
+  layerSplitJob?: LayerSplitJob
+  fineLayerDraft?: FineLayerDraft
+  layerElementName?: string
   brushSize?: number
   brushColor?: RepaintBrushColor
   sourceWidth?: number
@@ -327,6 +338,7 @@ type WorkflowNodeData = {
   onEditSketch?: (id: string) => void
   onOpenElementEdit?: (id: string) => void
   onOpenMultiAngle?: (id: string) => void
+  onOpenLayerSplit?: (id: string) => void
   onChangePrompt?: (id: string, prompt: string, mentions?: PromptMentionBinding[]) => void
   onLocatePromptMention?: (nodeId: string) => void
   onChangeOutpaintInsets?: (id: string, insets: OutpaintInsets) => void
@@ -789,6 +801,13 @@ const apiMartModels: ApiMartModelOption[] = [
   {
     id: 'gpt-image-2.5-sunburst',
     label: 'GPT Image 2.5 Sunburst',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+    maxReferenceImages: 16,
+  },
+  {
+    id: 'gpt-image-2.6',
+    label: 'GPT Image 2.6',
     resolutions: ['1K', '2K', '4K'],
     defaultResolution: '1K',
     maxReferenceImages: 16,
@@ -1265,6 +1284,7 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
     onEditSketch,
     onOpenElementEdit,
     onOpenMultiAngle,
+    onOpenLayerSplit,
     onChangePrompt,
     onLocatePromptMention,
     onChangeOutpaintInsets,
@@ -1295,6 +1315,7 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
   void onEditSketch
   void onOpenElementEdit
   void onOpenMultiAngle
+  void onOpenLayerSplit
   void onChangePrompt
   void onLocatePromptMention
   void onChangeOutpaintInsets
@@ -1441,6 +1462,12 @@ async function buildPackageProject(
         videoUrl: await cacheVideo(clean.data.videoUrl, clean.data.sourceName),
         sourceImageUrl: await cacheImage(clean.data.sourceImageUrl),
         maskUrl: await cacheImage(clean.data.maskUrl),
+        layerDocument: clean.data.layerDocument ? {
+          ...clean.data.layerDocument,
+          layers: await Promise.all(clean.data.layerDocument.layers.map(async (layer) => ({ ...layer, imageUrl: (await cacheImage(layer.imageUrl))! }))),
+          fillUndo: clean.data.layerDocument.fillUndo ? { ...clean.data.layerDocument.fillUndo, imageUrl: (await cacheImage(clean.data.layerDocument.fillUndo.imageUrl))! } : undefined,
+        } : undefined,
+        fineLayerDraft: clean.data.fineLayerDraft ? await mapFineDraftImages(clean.data.fineLayerDraft, async url => (await cacheImage(url))!) : undefined,
         sketch: clean.data.sketch ? {
           ...clean.data.sketch,
           layers: await Promise.all(clean.data.sketch.layers.map(async (layer) => ({ ...layer, imageUrl: await cacheImage(layer.imageUrl) }))),
@@ -2383,7 +2410,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const replaceImageInputRef = useRef<HTMLInputElement>(null)
   const replaceVideoInputRef = useRef<HTMLInputElement>(null)
   const promptTextareaRef = useRef<HTMLTextAreaElement>(null)
-  const modelPickerRef = useRef<HTMLDivElement>(null)
+  const generationPanelRef = useRef<HTMLElement>(null)
   const ensurePanelVisibleRef = useRef(data.onEnsureGenerationPanelVisible)
   ensurePanelVisibleRef.current = data.onEnsureGenerationPanelVisible
   const isPromptComposingRef = useRef(false)
@@ -2396,12 +2423,12 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const [mentionSelection, setMentionSelection] = useState(0)
   const [referenceImageRatio, setReferenceImageRatio] = useState('—')
   const [referencePixelSize, setReferencePixelSize] = useState('')
-  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false)
   const isImage = data.kind === 'image'
   const isVideo = data.kind === 'video'
   const isElementEditResult = isImage && Boolean(data.elementEditOperations?.length)
   const isMultiAngleResult = isImage && Boolean(data.multiAngleSettings)
-  const isDirectEditResult = isElementEditResult || isMultiAngleResult
+  const isLayerSplitResult = Boolean(data.layerDocument || data.layerSplitJob)
+  const isDirectEditResult = isElementEditResult || isMultiAngleResult || isLayerSplitResult || Boolean(data.layerElementName)
   const supportsPromptMentions = (isImage || isVideo) && !isDirectEditResult
   const isReference = data.kind === 'reference'
   const isVideoReference = data.kind === 'video-reference'
@@ -2446,7 +2473,9 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const modelOptions = data.generationModelOptions ?? (isVideo ? apiMartVideoModels : usesApiMartNodeSettings ? apiMartModels : [{ id: configuredModelName, label: apiModelDisplayName(configuredModelName) || '当前模型' }])
   const selectedModelId = isVideo ? videoModelConfig.id : usesApiMartNodeSettings ? imageModelConfig.id : configuredModelName
   const selectedModelLabel = modelOptions.find((model) => model.id === selectedModelId)?.label || apiModelDisplayName(configuredModelName) || '当前模型'
-  const nodeTitle = isElementEditResult
+  const nodeTitle = data.layerElementName ? `图层 · ${data.layerElementName}` : isLayerSplitResult
+    ? `分层结果 · ${data.layerDocument ? `${data.layerDocument.layers.length} 个图层` : '图层拆分'}`
+    : isElementEditResult
     ? `元素编辑结果 · ${sourceWidth} × ${sourceHeight}`
     : isMultiAngleResult
       ? `多角度结果 · ${sourceWidth} × ${sourceHeight}`
@@ -2483,7 +2512,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
       // Allow the existing quick-workflow viewport animation to finish first.
       timer = window.setTimeout(() => ensurePanelVisibleRef.current?.(nodeId), 300)
     }
-    const panel = modelPickerRef.current?.closest('.generation-panel')
+    const panel = generationPanelRef.current
     const observer = new ResizeObserver(ensureVisible)
     if (panel) observer.observe(panel)
     window.addEventListener('resize', ensureVisible)
@@ -2512,28 +2541,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   }, [data.promptMentions])
 
   useEffect(() => {
-    if (!isModelMenuOpen) return
-
-    const handleOutsidePointerDown = (event: PointerEvent) => {
-      if (event.target instanceof Element && !modelPickerRef.current?.contains(event.target)) {
-        setIsModelMenuOpen(false)
-      }
-    }
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setIsModelMenuOpen(false)
-    }
-
-    document.addEventListener('pointerdown', handleOutsidePointerDown, true)
-    document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      document.removeEventListener('pointerdown', handleOutsidePointerDown, true)
-      document.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [isModelMenuOpen])
-
-  useEffect(() => {
     if (isGenerating || !panelOpen) {
-      setIsModelMenuOpen(false)
       setMentionMenuOpen(false)
     }
   }, [isGenerating, panelOpen])
@@ -2541,7 +2549,6 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const selectNodeModel = (modelId: string) => {
     if (isImage) data.onChangeImageModel?.(nodeId, modelId)
     if (isVideo) data.onChangeVideoModel?.(nodeId, modelId)
-    setIsModelMenuOpen(false)
   }
 
   const commitPromptDraft = (nextPrompt: string, nextMentions?: PromptMentionBinding[]) => {
@@ -2774,6 +2781,15 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             <Wand2 size={14} />
             元素编辑
           </button>
+          <button
+            type="button"
+            disabled={isLayerSplitResult ? false : !data.imageUrl || isGenerating}
+            title={isLayerSplitResult ? '查看图层并导出 PSD' : '将画面拆分为透明图层'}
+            onClick={() => data.onOpenLayerSplit?.(nodeId)}
+          >
+            <Layers size={14} />
+            {isLayerSplitResult ? '编辑图层 / PSD' : '图层拆分'}
+          </button>
         </div>
       )}
       {(isImage || isVideo || isOutpaint) && (
@@ -2920,9 +2936,9 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             aria-live="polite"
           >
             {isGenerating ? (
-              <div className="node-generation-field" role="status" aria-label="正在生成图像">
+              <div className="node-generation-field" role="status" aria-label={isLayerSplitResult ? '正在拆分图层' : '正在生成图像'}>
                 <span className="node-generation-frame" aria-hidden="true" />
-                <span className="node-generation-copy">正在生成...</span>
+                <span className="node-generation-copy">{isLayerSplitResult ? '正在拆分图层…' : '正在生成...'}</span>
               </div>
             ) : (
               <>
@@ -3003,6 +3019,17 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
       {(
         <>
           <div className="node-actions">
+            {isLayerSplitResult && (
+              <button
+                className="node-layer-edit-button nodrag nopan"
+                type="button"
+                title="查看图层并导出 PSD"
+                onClick={() => data.onOpenLayerSplit?.(nodeId)}
+              >
+                <Layers size={14} />
+                <span>图层 / PSD</span>
+              </button>
+            )}
             {mediaDataForCopy(data) && (
               <button
                 className="nodrag nopan"
@@ -3119,6 +3146,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
     </div>
     {panelOpen && (
       <section
+        ref={generationPanelRef}
         className="generation-panel floating-prompt-control nodrag nopan nowheel"
         aria-label={isVideo ? '视频生成面板' : '图像生成面板'}
         onPointerDown={(event) => event.stopPropagation()}
@@ -3128,67 +3156,44 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
         <div className={`generation-panel-settings ${isVideo ? 'video-generation-settings' : 'image-generation-toolbar'}`}>
           <div className="generation-setting generation-model-setting">
             <span>模型</span>
-            <div
-              ref={modelPickerRef}
-              className={`node-model-picker nodrag nopan nowheel ${isModelMenuOpen ? 'open' : ''}`}
-              onPointerDown={(event) => event.stopPropagation()}
-            >
-              <button
-                className="node-model-select"
-                type="button"
-                aria-label={isVideo ? '视频生成模型' : '图像生成模型'}
-                aria-haspopup="listbox"
-                aria-expanded={isModelMenuOpen}
-                title={isModelMenuOpen ? '收起模型列表' : '展开模型列表'}
-                disabled={isGenerating}
-                onClick={() => setIsModelMenuOpen((open) => !open)}
-              >
-                <span>{selectedModelLabel}</span>
-                <ChevronDown size={14} aria-hidden="true" />
-              </button>
-              {isModelMenuOpen && (
-                <div
-                  className="node-model-menu"
-                  role="listbox"
-                  aria-label={isVideo ? '可选视频模型' : '可选图像模型'}
-                >
-                  {modelOptions.map((model) => {
-                    const isSelectedModel = model.id === selectedModelId
-                    return (
-                      <button
-                        key={model.id}
-                        className={`node-model-option ${isSelectedModel ? 'selected' : ''}`}
-                        type="button"
-                        role="option"
-                        aria-selected={isSelectedModel}
-                        onClick={() => selectNodeModel(model.id)}
-                      >
-                        {model.label}
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
+            <GenerationSelect
+              label={isVideo ? '视频生成模型' : '图像生成模型'}
+              menuLabel={isVideo ? '可选视频模型' : '可选图像模型'}
+              value={selectedModelId}
+              fallbackLabel={selectedModelLabel}
+              options={modelOptions.map((model) => ({ value: model.id, label: model.label }))}
+              disabled={isGenerating}
+              onChange={selectNodeModel}
+              onOpen={() => ensurePanelVisibleRef.current?.(nodeId)}
+            />
           </div>
-          <label className="generation-setting">
+          <div className="generation-setting">
             <span>画面比例</span>
-            <select aria-label={isVideo ? '视频画面比例' : '图像画面比例'} value={isMuseVideo && data.size === 'auto' ? 'auto' : selectedAspectRatio.size} disabled={isGenerating} onChange={(event) => data.onChangeSize?.(nodeId, event.target.value)}>
-              {isMuseVideo && <option value="auto">自动（跟随参考图）</option>}
-              {aspectRatioOptions.map((option) => <option key={option.size} value={option.size}>{option.label}</option>)}
-            </select>
-          </label>
-          <label className="generation-setting">
+            <GenerationSelect
+              label={isVideo ? '视频画面比例' : '图像画面比例'}
+              menuLabel="可选画面比例"
+              value={isMuseVideo && data.size === 'auto' ? 'auto' : selectedAspectRatio.size}
+              options={[
+                ...(isMuseVideo ? [{ value: 'auto', label: '自动（跟随参考图）' }] : []),
+                ...aspectRatioOptions.map((option) => ({ value: option.size, label: option.label })),
+              ]}
+              disabled={isGenerating}
+              onChange={(value) => data.onChangeSize?.(nodeId, value)}
+              onOpen={() => ensurePanelVisibleRef.current?.(nodeId)}
+            />
+          </div>
+          <div className="generation-setting">
             <span>清晰度</span>
-            <select
-              aria-label={isVideo ? '视频像素大小' : '图像输出清晰度'}
+            <GenerationSelect
+              label={isVideo ? '视频像素大小' : '图像输出清晰度'}
+              menuLabel="可选清晰度"
               value={isVideo ? selectedVideoResolution : selectedImageSize}
+              options={(isVideo ? videoModelConfig.resolutions : imageResolutionOptions.length ? imageResolutionOptions : [selectedImageSize]).map((resolution) => ({ value: resolution, label: resolution }))}
               disabled={isGenerating || (isVideo ? videoModelConfig.resolutions.length < 2 : imageResolutionOptions.length < 2)}
-              onChange={(event) => isVideo ? data.onChangeVideoResolution?.(nodeId, event.target.value as VideoResolutionTier) : data.onChangeImageSize?.(nodeId, event.target.value as ImageResolutionTier)}
-            >
-              {(isVideo ? videoModelConfig.resolutions : imageResolutionOptions.length ? imageResolutionOptions : [selectedImageSize]).map((resolution) => <option key={resolution} value={resolution}>{resolution}</option>)}
-            </select>
-          </label>
+              onChange={(value) => isVideo ? data.onChangeVideoResolution?.(nodeId, value as VideoResolutionTier) : data.onChangeImageSize?.(nodeId, value as ImageResolutionTier)}
+              onOpen={() => ensurePanelVisibleRef.current?.(nodeId)}
+            />
+          </div>
           {!isVideo && (
             <button
               className="generation-submit generation-submit-run"
@@ -3307,6 +3312,9 @@ export default function App() {
     nodeId: string
     sourceImageUrl: string
   } | null>(null)
+  const [layerSplitSession, setLayerSplitSession] = useState<{ nodeId: string; sourceImageUrl: string } | null>(null)
+  const [layerJobProgress, setLayerJobProgress] = useState<Record<string, string>>({})
+  const activeLayerRunsRef = useRef(new Map<string, AbortController>())
   const [model3DEditSession, setModel3DEditSession] = useState<{
     nodeId: string | null
     sceneId: string | null
@@ -3555,6 +3563,7 @@ export default function App() {
       setLightDirectionNodeId((current) => (current && idsToDelete.has(current) ? null : current))
       setElementEditSession((current) => (current && idsToDelete.has(current.nodeId) ? null : current))
       setMultiAngleSession((current) => (current && idsToDelete.has(current.nodeId) ? null : current))
+      setLayerSplitSession((current) => (current && idsToDelete.has(current.nodeId) ? null : current))
       sceneIdsToDelete.forEach((sceneId) => void deleteModel3DScene(sceneId))
       markDirty()
       setToast(idsToDelete.size > 1 ? `已删除 ${idsToDelete.size} 个画布节点。` : '已删除选中的画布节点。')
@@ -3688,7 +3697,7 @@ export default function App() {
 
   const handleDeleteKey = useCallback(
     (event: KeyboardEvent) => {
-      if (event.key !== 'Delete' || showSettings || showModelStudio || sketchSession || elementEditSession || multiAngleSession || groupDialog || historyMediaPreview || lightDirectionNodeId || isKeyboardControlTarget(event.target)) return
+      if (event.key !== 'Delete' || showSettings || showModelStudio || sketchSession || elementEditSession || multiAngleSession || layerSplitSession || groupDialog || historyMediaPreview || lightDirectionNodeId || isKeyboardControlTarget(event.target)) return
 
       const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id)
       if (selectedNodeId && !selectedNodeIds.includes(selectedNodeId)) selectedNodeIds.push(selectedNodeId)
@@ -3697,7 +3706,7 @@ export default function App() {
       event.preventDefault()
       deleteNodesByIds(selectedNodeIds)
     },
-    [deleteNodesByIds, elementEditSession, groupDialog, historyMediaPreview, lightDirectionNodeId, multiAngleSession, nodes, selectedNodeId, showModelStudio, sketchSession, showSettings],
+    [deleteNodesByIds, elementEditSession, groupDialog, historyMediaPreview, lightDirectionNodeId, multiAngleSession, layerSplitSession, nodes, selectedNodeId, showModelStudio, sketchSession, showSettings],
   )
 
   useEffect(() => {
@@ -4074,6 +4083,141 @@ export default function App() {
     [nodes],
   )
 
+  async function openLayerSplitFromNode(nodeId: string) {
+    const source = nodes.find(node => node.id === nodeId)
+    if (!source) return
+    const imageUrl = (source.data.layerDocument || source.data.layerSplitJob) ? source.data.sourceImageUrl || source.data.imageUrl : source.data.imageUrl
+    if (!imageUrl) return
+    try {
+      setLayerSplitSession({ nodeId, sourceImageUrl: await imageAsDataUrl(imageUrl) })
+    } catch (error) { setToast(error instanceof Error ? error.message : '分层原图读取失败。') }
+  }
+
+  useEffect(() => {
+    const ids = new Set(nodes.map(node => node.id))
+    for (const [nodeId, controller] of activeLayerRunsRef.current) {
+      if (!ids.has(nodeId)) { controller.abort(); activeLayerRunsRef.current.delete(nodeId) }
+    }
+  }, [nodes])
+  useEffect(() => {
+    const active = activeLayerRunsRef.current
+    return () => { for (const controller of active.values()) controller.abort(); active.clear() }
+  }, [])
+
+  async function finishLayerSplit(nodeId: string, job: LayerSplitJob) {
+    if (activeLayerRunsRef.current.has(nodeId)) return
+    const controller = new AbortController()
+    activeLayerRunsRef.current.set(nodeId, controller)
+    setLayerJobProgress(current => ({ ...current, [nodeId]: '正在获取分层任务…' }))
+    setNodes(current => current.map(node => node.id === nodeId ? { ...node, data: { ...node.data, status: 'generating', error: undefined } } : node))
+    try {
+      const layerDocument = await collectLayerSplit(job, text => {
+        setLayerJobProgress(current => ({ ...current, [nodeId]: text }))
+      }, controller.signal)
+      const canvas = await renderLayerDocument(layerDocument)
+      const imageUrl = await cacheCanvasImage(canvas.toDataURL('image/png'))
+      if (controller.signal.aborted) return
+      setNodes(current => current.map(node => node.id === nodeId && node.data.layerSplitJob?.requestId === job.requestId ? {
+        ...node, data: { ...node.data, layerDocument, imageUrl, status: 'done', error: undefined },
+      } : node))
+      markDirty()
+      setToast(`已拆分为 ${layerDocument.layers.length} 个透明图层，可打开“图层 / PSD”导出。`)
+    } catch (error) {
+      if (controller.signal.aborted) return
+      setNodes(current => current.map(node => node.id === nodeId ? {
+        ...node, data: { ...node.data, status: 'error', error: error instanceof Error ? error.message : '图层拆分失败，可继续获取结果。' },
+      } : node))
+      markDirty()
+    } finally {
+      activeLayerRunsRef.current.delete(nodeId)
+      setLayerJobProgress(current => { const next = { ...current }; delete next[nodeId]; return next })
+    }
+  }
+
+  async function submitLayerSplit(input: LayerSplitInput) {
+    const source = nodes.find(node => node.id === layerSplitSession?.nodeId)
+    if (!source) throw new Error('原图已不在画布中，请重新打开。')
+    const sourceImageUrl = await cacheCanvasImage(input.imageUrl)
+    const result = await layerRequest<{ requestId: string }>('submit', input)
+    const job: LayerSplitJob = { requestId: result.requestId, numLayers: input.numLayers, width: input.width, height: input.height, caption: input.caption }
+    const nodeId = id('layer-result')
+    const position = getAbsoluteNodePosition(source, nodes)
+    const resultNode: WorkflowNode = {
+      id: nodeId, type: 'workflow', selected: true,
+      position: findFreeWorkflowNodePosition({ x: position.x + 430, y: position.y }, { width: 330, height: 450 }, nodes),
+      data: {
+        kind: 'image', title: '分层结果', model: 'Qwen-Image-Layered', status: 'generating', sourceImageUrl,
+        layerSplitJob: job, sourceWidth: input.width, sourceHeight: input.height, size: `${input.width}x${input.height}`,
+        sourceName: source.data.sourceName || source.data.title, createdAt: new Date().toLocaleString('zh-CN'),
+      },
+    }
+    setNodes(current => [...current.map(node => ({ ...node, selected: false })), resultNode])
+    setEdges(current => [...current, {
+      id: id('edge'), source: source.id, sourceHandle: 'output', target: nodeId, targetHandle: `${imageInputHandlePrefix}1`,
+      markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor }, style: { stroke: workflowEdgeColor, strokeWidth: 1.6 },
+    }])
+    setSelectedNodeId(nodeId)
+    setLayerSplitSession({ nodeId, sourceImageUrl: input.imageUrl })
+    markDirty()
+    void finishLayerSplit(nodeId, job)
+  }
+
+  async function saveLayerSplit(doc: LayerDocument) {
+    const nodeId = layerSplitSession?.nodeId
+    if (!nodes.some(node => node.id === nodeId)) throw new Error('分层结果节点已不存在。')
+    const canvas = await renderLayerDocument(doc)
+    const imageUrl = await cacheCanvasImage(canvas.toDataURL('image/png'))
+    setNodes(current => current.map(node => node.id === nodeId ? { ...node, data: { ...node.data, layerDocument: doc, imageUrl, status: 'done' } } : node))
+    markDirty()
+  }
+
+  function saveFineLayerDraft(draft?: FineLayerDraft) {
+    const nodeId = layerSplitSession?.nodeId
+    setNodes(current => current.map(node => node.id === nodeId ? { ...node, data: { ...node.data, fineLayerDraft: draft } } : node))
+    markDirty()
+  }
+
+  async function createFineLayerResult(doc: LayerDocument) {
+    const source = nodes.find(node => node.id === layerSplitSession?.nodeId)
+    if (!source || !layerSplitSession) throw new Error('原图已不在画布中。')
+    const sourceImageUrl = await cacheCanvasImage(layerSplitSession.sourceImageUrl)
+    const canvas = await renderLayerDocument(doc)
+    const imageUrl = await cacheCanvasImage(canvas.toDataURL('image/png'))
+    const nodeId = id('layer-result'), position = getAbsoluteNodePosition(source, nodes)
+    const resultNode: WorkflowNode = {
+      id: nodeId, type: 'workflow', selected: true,
+      position: findFreeWorkflowNodePosition({ x: position.x + 430, y: position.y }, { width: 330, height: 450 }, nodes),
+      data: { kind: 'image', title: '精细分层结果', model: 'SAM 3 + GPT', status: 'done', sourceImageUrl, imageUrl,
+        layerDocument: doc, sourceWidth: doc.width, sourceHeight: doc.height, size: `${doc.width}x${doc.height}`,
+        sourceName: source.data.sourceName || source.data.title, createdAt: new Date().toLocaleString('zh-CN') },
+    }
+    setNodes(current => [...current.map(node => ({ ...node, selected: false, data: node.id === source.id ? { ...node.data, fineLayerDraft: undefined } : node.data })), resultNode])
+    setEdges(current => [...current, { id: id('edge'), source: source.id, sourceHandle: 'output', target: nodeId, targetHandle: `${imageInputHandlePrefix}1`,
+      markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor }, style: { stroke: workflowEdgeColor, strokeWidth: 1.6 } }])
+    setSelectedNodeId(nodeId)
+    setLayerSplitSession({ nodeId, sourceImageUrl })
+    markDirty(); setToast('精细分层已保存并连接原图，可查看图层或导出 PSD。')
+  }
+
+  async function extractLayerToCanvas(layer: RasterLayer, doc: LayerDocument) {
+    const source = nodes.find(node => node.id === layerSplitSession?.nodeId)
+    if (!source) throw new Error('分层结果节点已不存在。')
+    // Keep the original canvas and offsets so extracted elements line up when reused as references.
+    const canvas = await renderLayerDocument({ ...doc, layers: [{ ...layer, visible: true }] })
+    const imageUrl = await cacheCanvasImage(canvas.toDataURL('image/png'))
+    const position = getAbsoluteNodePosition(source, nodes)
+    const nodeId = id('layer-element')
+    const node: WorkflowNode = {
+      id: nodeId, type: 'workflow', selected: true,
+      position: findFreeWorkflowNodePosition({ x: position.x + 420, y: position.y }, { width: 312, height: 450 }, nodes),
+      data: { kind: 'image', title: layer.name, layerElementName: layer.name, model: '图层提取', imageUrl, status: 'done', size: `${doc.width}x${doc.height}`, sourceName: layer.name, createdAt: new Date().toLocaleString('zh-CN') },
+    }
+    setNodes(current => [...current.map(item => ({ ...item, selected: false })), node])
+    setEdges(current => [...current, { id: id('edge'), source: source.id, sourceHandle: 'output', target: nodeId, targetHandle: `${imageInputHandlePrefix}1`, style: { stroke: workflowEdgeColor, strokeWidth: 1.6 } }])
+    setSelectedNodeId(nodeId)
+    markDirty()
+  }
+
   const generateRelitImageFromNode = useCallback(
     async (sourceNodeId: string) => {
       const sourceNode = nodes.find((item) => item.id === sourceNodeId)
@@ -4372,7 +4516,8 @@ export default function App() {
     const left = Math.min(card.left, panel.left) - 16
     const right = Math.max(card.right, panel.right) + 16
     const top = card.top - 52
-    const bottom = panel.bottom + 84
+    const menu = element?.querySelector('.node-model-menu')?.getBoundingClientRect()
+    const bottom = Math.max(panel.bottom, menu?.bottom ?? panel.bottom) + 84
     if (left >= canvas.left && right <= canvas.right && top >= canvas.top && bottom <= canvas.bottom) return
     const zoom = flowInstance.getViewport().zoom
     const position = flowInstance.screenToFlowPosition({ x: left, y: top })
@@ -4497,7 +4642,7 @@ export default function App() {
       ? findApiMartVideoModel(node.data.model || apiConfig.videoModel)
       : null
     const imageInputSlots = usesOrderedImageSlots
-      ? referenceInputSlots(connectedImageIndexes, imageInputHandlePrefix, videoModel?.maxReferenceImages)
+      ? referenceInputSlots(connectedImageIndexes, imageInputHandlePrefix, node.data.layerSplitJob || node.data.layerDocument ? 1 : videoModel?.maxReferenceImages)
       : [{ id: 'image', index: 1, connected: connectedImageIndexes.has(1) }]
     const connectedVideoIndexes = new Set(
       videoInputEdges.map((edge, index) => videoInputHandleIndex(edge.targetHandle) ?? index + 1),
@@ -4553,6 +4698,7 @@ export default function App() {
         },
         onOpenElementEdit: (nodeId: string) => void openElementEditFromNode(nodeId),
         onOpenMultiAngle: (nodeId: string) => void openMultiAngleFromNode(nodeId),
+        onOpenLayerSplit: (nodeId: string) => void openLayerSplitFromNode(nodeId),
         onChangePrompt: changeNodePrompt,
         onLocatePromptMention: locatePromptMention,
         onChangeOutpaintInsets: changeNodeOutpaintInsets,
@@ -5928,7 +6074,7 @@ export default function App() {
     const ignoreClipboardEvent = (event: ClipboardEvent) => {
       const target = event.target instanceof Element ? event.target : null
       return event.defaultPrevented || Boolean(target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) ||
-        Boolean(showSettings || showModelStudio || sketchSession || elementEditSession || multiAngleSession || showHistoryPanel || historyMediaPreview || groupDialog || lightDirectionNodeId)
+        Boolean(showSettings || showModelStudio || sketchSession || elementEditSession || multiAngleSession || layerSplitSession || showHistoryPanel || historyMediaPreview || groupDialog || lightDirectionNodeId)
     }
     const handleCopyMedia = (event: ClipboardEvent) => {
       if (ignoreClipboardEvent(event) || window.getSelection()?.toString()) return
@@ -6012,6 +6158,7 @@ export default function App() {
     lightDirectionNodeId,
     markDirty,
     multiAngleSession,
+    layerSplitSession,
     nodes.length,
     setNodes,
     pasteNodeResults,
@@ -6366,6 +6513,7 @@ export default function App() {
   const multiAngleNode = multiAngleSession
     ? nodes.find((node) => node.id === multiAngleSession.nodeId) ?? null
     : null
+  const layerSplitNode = layerSplitSession ? nodes.find(node => node.id === layerSplitSession.nodeId) : null
 
   return (
     <main className="canvas-app">
@@ -6977,6 +7125,28 @@ export default function App() {
         </Suspense>
       )}
 
+      {layerSplitSession && layerSplitNode && (
+        <Suspense fallback={<div className="modal-backdrop" role="status">正在加载图层拆分…</div>}>
+          <LayerSplitStudio
+            key={layerSplitSession.nodeId}
+            sourceImageUrl={layerSplitSession.sourceImageUrl}
+            sourceName={layerSplitNode.data.sourceName || layerSplitNode.data.title}
+            document={layerSplitNode.data.layerDocument}
+            job={layerSplitNode.data.layerSplitJob}
+            running={Boolean(layerJobProgress[layerSplitNode.id])}
+            progress={layerJobProgress[layerSplitNode.id]}
+            error={layerSplitNode.data.error}
+            fineDraft={layerSplitNode.data.fineLayerDraft}
+            onFineDraft={saveFineLayerDraft}
+            onCreateFine={createFineLayerResult}
+            onRun={submitLayerSplit}
+            onResume={() => { if (layerSplitNode.data.layerSplitJob) void finishLayerSplit(layerSplitNode.id, layerSplitNode.data.layerSplitJob) }}
+            onSave={saveLayerSplit}
+            onExtract={extractLayerToCanvas}
+            onClose={() => setLayerSplitSession(null)}
+          />
+        </Suspense>
+      )}
       {sketchSession && (
         <Suspense fallback={<div className="modal-backdrop" role="status">正在加载手绘画板…</div>}>
           <SketchStudio initialDocument={sketchSession.document} defaultModel={apiConfig.model} defaultResolution={apiConfig.imageSize} models={sketchModels} apiReady={apiConfig.mode === 'mock' || Boolean(apiConfig.apiKey.trim())} onComplete={saveSketchToCanvas} onCancel={() => setSketchSession(null)} />

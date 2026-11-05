@@ -152,8 +152,8 @@ const defaultParametricBoxSettings: ParametricBoxSettings = {
   thickness: 12,
   gap: 6,
   pose: 'separated',
-  baseColor: '#B8C7D6',
-  lidColor: '#D6C2B8',
+  baseColor: '#FFFFFF',
+  lidColor: '#FFFFFF',
 }
 
 const defaultCylinderSettings: ParametricPrimitiveSettings = {
@@ -162,7 +162,7 @@ const defaultCylinderSettings: ParametricPrimitiveSettings = {
   height: 220,
   length: 200,
   width: 200,
-  color: '#AFC9D8',
+  color: '#FFFFFF',
 }
 
 const defaultCuboidSettings: ParametricPrimitiveSettings = {
@@ -171,11 +171,11 @@ const defaultCuboidSettings: ParametricPrimitiveSettings = {
   height: 180,
   length: 260,
   width: 200,
-  color: '#C9B9A9',
+  color: '#FFFFFF',
 }
 
-const defaultModelColor = '#b8c7d6'
-const defaultBackgroundColor = '#111820'
+const defaultModelColor = '#ffffff'
+const defaultBackgroundColor = '#161616'
 const defaultLightAzimuth = -55
 const defaultLightElevation = 38
 const defaultLightIntensity = 100
@@ -736,7 +736,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     selectionBox.material.opacity = 0.78
     scene.add(selectionBox)
 
-    const hemisphere = new THREE.HemisphereLight(0xf4f8ff, 0x24303b, defaultHemisphereIntensity)
+    const hemisphere = new THREE.HemisphereLight(0xffffff, 0x292929, defaultHemisphereIntensity)
     scene.add(hemisphere)
 
     const keyLight = new THREE.DirectionalLight(0xffffff, defaultKeyLightIntensity)
@@ -755,11 +755,11 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     scene.add(keyLight.target)
     setDirectionalLightPosition(keyLight, controls.target, defaultLightAzimuth, defaultLightElevation)
 
-    const rimLight = new THREE.DirectionalLight(0x8fcde3, defaultRimLightIntensity)
+    const rimLight = new THREE.DirectionalLight(0xffffff, defaultRimLightIntensity)
     rimLight.position.set(-5, 3, -4)
     scene.add(rimLight)
 
-    const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x18212a, roughness: 1, metalness: 0 })
+    const groundMaterial = new THREE.MeshStandardMaterial({ color: defaultBackgroundColor, roughness: 1, metalness: 0 })
     const ground = new THREE.Mesh(new THREE.PlaneGeometry(30, 30), groundMaterial)
     ground.rotation.x = -Math.PI / 2
     ground.position.y = -0.02
@@ -950,8 +950,8 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
       materials.forEach((material) => {
         material.emissive.set(0x000000)
         material.emissiveIntensity = 0
-        material.roughness = lightEnabled ? 0.58 : 0.86
-        material.metalness = lightEnabled ? 0.08 : 0.02
+        material.roughness = 0.86
+        material.metalness = 0
         material.needsUpdate = true
       })
     })
@@ -1012,8 +1012,8 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
       color,
       emissive: 0x000000,
       emissiveIntensity: 0,
-      roughness: lightEnabled ? 0.58 : 0.86,
-      metalness: lightEnabled ? 0.08 : 0.02,
+      roughness: 0.86,
+      metalness: 0,
     })
   }
 
@@ -1219,7 +1219,10 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
   async function restoreSavedScene(saved: SavedModel3DScene) {
     const sequence = loadSequenceRef.current
     setViewportId(viewportPresets.some((preset) => preset.id === saved.viewportId) ? saved.viewportId : 'square')
-    setBackgroundColor(saved.backgroundColor || defaultBackgroundColor)
+    // Replace the former factory blue background, while preserving custom colors.
+    setBackgroundColor(saved.backgroundColor?.toLowerCase() === '#111820'
+      ? defaultBackgroundColor
+      : saved.backgroundColor || defaultBackgroundColor)
     setFocalLength(saved.focalLength || 50)
     setShowProjection(Boolean(saved.showProjection))
     setLightEnabled(saved.lightEnabled !== false)

@@ -1,6 +1,7 @@
 import { defineConfig, type Plugin, type ViteDevServer } from 'vite'
 import react from '@vitejs/plugin-react'
 import { model3DAssetsPlugin } from './server/model3dPlugin.ts'
+import { layerSplitPlugin } from './server/layerSplitPlugin.ts'
 import { ZipArchive, type ArchiverError } from 'archiver'
 import { Open as ZipOpen } from 'unzipper'
 import { execFileSync, spawn } from 'node:child_process'
@@ -88,7 +89,7 @@ function configuredProxyUrl() {
 function shouldUseUpstreamProxy(endpoint: string) {
   try {
     const hostname = new URL(endpoint).hostname.toLowerCase()
-    return ['apimart.ai', 'change2pro.com'].some(
+    return ['apimart.ai', 'change2pro.com', 'fal.run', 'fal.media'].some(
       (domain) => hostname === domain || hostname.endsWith(`.${domain}`),
     )
   } catch {
@@ -625,6 +626,26 @@ async function transformProjectImageValues(
       for (const layer of sketch.layers) {
         if (isJsonRecord(layer) && typeof layer.imageUrl === 'string' && layer.imageUrl) layer.imageUrl = await transform(layer.imageUrl)
       }
+    }
+    const layerDocument = nodeValue.data.layerDocument
+    if (isJsonRecord(layerDocument) && Array.isArray(layerDocument.layers)) {
+      for (const layer of layerDocument.layers) {
+        if (isJsonRecord(layer) && typeof layer.imageUrl === 'string' && layer.imageUrl) layer.imageUrl = await transform(layer.imageUrl)
+      }
+      const undo = layerDocument.fillUndo
+      if (isJsonRecord(undo) && typeof undo.imageUrl === 'string' && undo.imageUrl) undo.imageUrl = await transform(undo.imageUrl)
+    }
+    const fineDraft = nodeValue.data.fineLayerDraft
+    if (isJsonRecord(fineDraft)) {
+      const visit = async (value: unknown): Promise<void> => {
+        if (Array.isArray(value)) { for (const item of value) await visit(item); return }
+        if (!isJsonRecord(value)) return
+        for (const [key, child] of Object.entries(value)) {
+          if (['imageUrl', 'maskUrl', 'resultImageUrl'].includes(key) && typeof child === 'string' && child) value[key] = await transform(child)
+          else if (child && typeof child === 'object') await visit(child)
+        }
+      }
+      await visit(fineDraft)
     }
   }
 
@@ -1500,7 +1521,7 @@ const apiMartModelConfigs: Record<
     defaultResolution: ImageResolutionTier
     maxReferenceImages: number
     requiresPublicReferenceUrls?: boolean
-    defaultQuality?: 'medium'
+    defaultQuality?: 'medium' | 'auto'
     midjourneyVersion?: string
   }
 > = {
@@ -1544,6 +1565,15 @@ const apiMartModelConfigs: Record<
     maxReferenceImages: 16,
     requiresPublicReferenceUrls: true,
     defaultQuality: 'medium',
+  },
+  // Request configuration: https://apimart.ai/zh/model/gpt-image-2-6
+  'gpt-image-2.6': {
+    label: 'GPT Image 2.6',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+    maxReferenceImages: 16,
+    requiresPublicReferenceUrls: true,
+    defaultQuality: 'auto',
   },
   'seedream-5-0-pro': {
     label: 'Seedream 5.0 Pro',
@@ -1815,7 +1845,7 @@ async function requestApiMartImage(config: ApiConfig, prompt: string, referenceI
         resolution,
         n: 1,
       }
-  // GPT Image 2.5 only accepts public HTTP(S) references, unlike GPT Image 2's base64 support.
+  // GPT Image 2.5/2.6 use public HTTP(S) references; upload local images first.
   const preparedImages: string[] = []
   if (modelConfig.requiresPublicReferenceUrls) {
     for (const [index, imageUrl] of referenceImageUrls.entries()) {
@@ -2714,7 +2744,7 @@ function localImageLibraryPlugin(): Plugin {
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), model3DAssetsPlugin(), localImageLibraryPlugin()],
+  plugins: [react(), model3DAssetsPlugin(), localImageLibraryPlugin(), layerSplitPlugin({ readBody, sendJson, fetchUpstream, loadImageBuffer, consumeGenerationQuota })],
   server: {
     watch: {
       ignored: [

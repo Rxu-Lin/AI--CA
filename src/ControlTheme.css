@@ -62,7 +62,7 @@
 }
 
 .canvas-app :is(.project-name, .field input, .field select, .field textarea, .group-name-field input,
-  .generation-setting select, .node-model-select, .multi-angle-model-trigger, .api-mode-select,
+  .node-model-select, .multi-angle-model-trigger, .api-mode-select,
   .sketch-inspector select, .sketch-inspector input:not([type=range]):not([type=color]),
   .model3d-unit-input, .model3d-select, .model3d-parametric-grid input,
   .model3d-color-field input[type=text], .model3d-transform-group label,
@@ -135,7 +135,7 @@
 }
 
 .canvas-app :is(.canvas-quick-start-button, .canvas-tool-trigger > .prompt-library-toggle,
-  .selection-toolbar > button, .image-context-actions button,
+  .selection-toolbar > button, .image-context-actions button, .node-actions .node-layer-edit-button,
   .multi-angle-presets button, .multi-angle-foot .multi-angle-reset,
   .sketch-layer-actions button, .sketch-row-buttons button, .sketch-footer button,
   .element-edit-foot button, .model3d-view-buttons button, .model3d-coordinate-space button,
@@ -192,3 +192,21 @@
   outline: 2px solid #d5d5d5;
   outline-offset: 3px;
 }
+
+/* Keep focus inside the shared dropdown frame, without an outer white ring. */
+.canvas-app .generation-panel :is(.node-model-select, .node-model-option):focus-visible {
+  outline: none;
+}
+
+.canvas-app .generation-panel .node-model-select:focus-visible {
+  --glass-edge: var(--glass-edge-active);
+  box-shadow: var(--glass-control-shadow);
+}
+
+.canvas-app select :is(option, optgroup) {
+  background-color: #202020;
+  color: #e8e8e8;
+}
+
+.canvas-app select option:checked { background-color: #454545; color: #ffffff; }
+.canvas-app select option:disabled { color: #777777; }

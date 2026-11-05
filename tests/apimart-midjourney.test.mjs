@@ -193,3 +193,50 @@ test('existing GPT Image 2.5 keeps public uploads, lowercase resolution and qual
   assert.equal(h.uploads.length, 1)
   assert.equal(h.uploads[0][4], false)
 })
+
+test('GPT Image 2.6 is selectable with matching frontend/server limits', () => {
+  const context = vm.createContext({})
+  vm.runInContext(compile(declarations(appSource, ['apiMartModels', 'findApiMartModel', 'apiMartVideoModels', 'apiModelDisplayName'], ts.ScriptKind.TSX)), context)
+  const option = plain(context.findApiMartModel('gpt-image-2.6'))
+  assert.equal(option.id, 'gpt-image-2.6')
+  assert.equal(context.apiModelDisplayName(option.id), 'GPT Image 2.6')
+  const capabilities = plain(vm.runInContext("apiMartModelConfigs['gpt-image-2.6']", harness().context))
+  for (const key of ['label', 'resolutions', 'defaultResolution', 'maxReferenceImages']) assert.deepEqual(option[key], capabilities[key])
+  assert.deepEqual(option.resolutions, ['1K', '2K', '4K'])
+  assert.equal(option.maxReferenceImages, 16)
+})
+
+for (const imageSize of ['1K', '2K', '4K']) {
+  test(`GPT Image 2.6 submits ${imageSize} with auto quality and polls the image result`, async () => {
+    const h = harness([submitted, { data: { status: 'completed', result: { images: [{ url: ['https://cdn.example/gpt26.png'] }] } } }])
+    assert.equal((await h.run({ model: 'gpt-image-2.6', imageSize })).data[0].url, 'https://cdn.example/gpt26.png')
+    assert.equal(h.calls[0].endpoint, config.endpoint)
+    assert.deepEqual(h.calls[0].payload, { model: 'gpt-image-2.6', prompt: '产品海报', size: '9:16', resolution: imageSize.toLowerCase(), quality: 'auto', n: 1 })
+    assert.equal(h.calls[1].endpoint, 'https://api.apimart.ai/v1/tasks/task_mj_82?language=zh')
+    assert.equal(h.uploads.length, 0)
+  })
+}
+
+test('GPT Image 2.6 prepares up to 16 public references in input order and rejects 17 before uploading', async () => {
+  const refs = Array.from({ length: 16 }, (_, index) => `/api/assets/ref-${index}.png`)
+  const h = harness([{ data: [{ url: 'https://cdn.example/gpt26.png' }] }])
+  await h.run({ model: 'gpt-image-2.6', imageSize: '3K' }, refs)
+  assert.deepEqual(h.uploads.map((args) => args[2]), refs)
+  assert.deepEqual(h.uploads.map((args) => args[3]), refs.map((_, index) => index))
+  assert.ok(h.uploads.every((args) => args[4] === false))
+  assert.equal(h.calls[0].payload.image_urls.length, 16)
+  assert.equal(h.calls[0].payload.resolution, '1k', 'unsupported saved resolutions use the model default')
+  const excess = harness()
+  await assert.rejects(excess.run({ model: 'gpt-image-2.6' }, [...refs, '/api/assets/extra.png']), /GPT Image 2.6.*16 张参考图/)
+  assert.equal(excess.uploads.length, 0)
+  assert.equal(excess.calls.length, 0)
+})
+
+test('GPT Image 2.6 preserves upstream access and task failures without returning a different model', async () => {
+  const denied = harness([{ httpStatus: 403, body: { error: { message: 'model access denied' } } }])
+  await assert.rejects(denied.run({ model: 'gpt-image-2.6' }), /model access denied.*GPT Image 2.6/)
+  assert.equal(denied.calls.length, 1)
+  const failed = harness([submitted, { data: { status: 'failed', error: { message: 'generation failed upstream' } } }])
+  await assert.rejects(failed.run({ model: 'gpt-image-2.6' }), /generation failed upstream/)
+  assert.equal(failed.calls.filter((call) => call.method === 'POST').length, 1)
+})
