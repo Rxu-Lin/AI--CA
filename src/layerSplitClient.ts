@@ -1,26 +1,8 @@
 import { createLayerDocument, type LayerSplitJob, type LayerImage } from './layerDocument.ts'
+import { falRequest } from './falClient.ts'
 
-const keyStorage = 'ai-canvas-fal-layer-key'
-let currentKey = ''
-export function readLayerApiKey() {
-  try { return window.sessionStorage.getItem(keyStorage) || currentKey } catch { return currentKey }
-}
-export function saveLayerApiKey(key: string) {
-  currentKey = key.trim()
-  try {
-    if (currentKey) window.sessionStorage.setItem(keyStorage, currentKey)
-    else window.sessionStorage.removeItem(keyStorage)
-  } catch { /* Memory still supports the current page if sessionStorage is blocked. */ }
-}
 export async function layerRequest<T>(operation: string, values: object, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(`/api/layers/${operation}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...values, apiKey: readLayerApiKey() || undefined }),
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(180_000)]) : AbortSignal.timeout(180_000),
-  })
-  const data = await response.json().catch(() => null)
-  if (!response.ok || !data) throw new Error(data?.error || `分层请求失败（${response.status}）。可继续获取原任务结果。`)
-  return data as T
+  return falRequest<T>(`/api/layers/${operation}`, values, 180_000, '分层请求失败，已有任务可继续获取结果', signal)
 }
 export async function collectLayerSplit(job: LayerSplitJob, onProgress: (text: string) => void, signal?: AbortSignal) {
   const deadline = Date.now() + 20 * 60_000

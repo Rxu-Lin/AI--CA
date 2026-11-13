@@ -1,5 +1,5 @@
-.layer-split-backdrop { position: fixed; inset: 0; z-index: 115; display: grid; place-items: center; padding: 24px; background: #050505c9; backdrop-filter: blur(12px); }
-.layer-split-studio { width: min(1160px, 100%); height: min(820px, calc(100dvh - 48px)); display: flex; flex-direction: column; overflow: hidden; color: #e8e8e8; font-size: 13px; outline: none; }
+.layer-split-backdrop { position: fixed; inset: 0; z-index: 115; display: grid; place-items: center; padding: 16px; background: #050505c9; backdrop-filter: blur(12px); }
+.layer-split-studio { width: 100%; height: 100%; min-width: 0; min-height: 0; max-height: 100%; display: flex; flex-direction: column; overflow: hidden; color: #e8e8e8; font-size: 13px; outline: none; }
 .canvas-app .layer-split-studio { border: var(--glass-frame-width) solid transparent; border-radius: var(--panel-radius); background: var(--glass-mist) padding-box, var(--glass-fill) padding-box, var(--glass-edge) border-box; box-shadow: var(--glass-inner-glow), 0 12px 36px #0006; }
 .layer-split-studio button, .layer-split-studio input, .layer-split-studio textarea { font: inherit; }
 .layer-split-studio button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 11px; color: #d5d5d5; border: var(--glass-frame-width) solid transparent; border-radius: 10px; background: var(--glass-control-fill) padding-box, var(--glass-edge) border-box; cursor: pointer; }
@@ -42,10 +42,6 @@
 .layer-split-studio input:not([type=range]), .layer-split-studio textarea { display: block; width: 100%; min-width: 0; box-sizing: border-box; margin-top: 7px; border: var(--glass-frame-width) solid transparent; border-radius: var(--control-radius); background: var(--glass-control-fill) padding-box, var(--glass-edge) border-box; color: #e0e0e0; padding: 10px; }
 .layer-split-description textarea { height: 76px; resize: vertical; line-height: 1.6; font-size: 11px; }
 .layer-split-help { margin: 12px 0 0; color: #838383; font-size: 10px; line-height: 1.7; }
-.layer-split-credentials { margin: 0 0 18px; padding: 12px; background: #0a0a0a66; border: 1px solid #ffffff10; border-radius: 12px; font-size: 11px; }
-.layer-split-credentials button { margin-top: 8px; font-size: 10px; padding: 5px 8px; }
-.layer-split-credentials p { color: #969696; line-height: 1.6; font-size: 10px; }
-.layer-split-credentials a { color: #dedede; text-decoration: none; font-size: 10px; }
 .layer-split-empty { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 36px 24px; gap: 12px; color: #747474; }
 .layer-split-empty strong { font-size: 12px; font-weight: 500; color: #aaa; }
 .layer-split-empty p { font-size: 11px; line-height: 1.7; margin: 0; }
@@ -82,9 +78,6 @@
 .fine-layer-mask.brush-cursor { cursor: none; }
 .fine-layer-hints { pointer-events: none; }
 .fine-layer-cursor { position: absolute; pointer-events: none; border: 1px solid #fff; box-shadow: 0 0 0 1px #000b; border-radius: 50%; transform: translate(-50%, -50%); box-sizing: border-box; }
-.fine-layer-credentials { margin-bottom: 14px; font-size: 11px; color: #aaa; }
-.fine-layer-credentials summary { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 6px 0; }
-.fine-layer-credentials .layer-split-credentials { margin: 6px 0 0; }
 .fine-layer-name { display: block; margin-top: 12px; }
 .fine-layer-name input { display: block; margin-top: 7px; }
 .fine-layer-wide { width: 100%; margin-top: 10px; font-size: 11px !important; }
@@ -103,14 +96,13 @@
 .fine-layer-body .node-model-option:is(.selected, .active) { background: #e6e6e6; color: #202020; }
 .fine-layer-body .node-model-option:is(.selected, .active):hover { color: #202020; }
 @media (max-width: 800px) {
-  .layer-split-backdrop { padding: 10px; }
-  .layer-split-studio { height: calc(100dvh - 20px); }
   .layer-split-body { grid-template-columns: minmax(0, 1fr) 260px; }
   .layer-split-workspace { padding: 10px; }
   .layer-split-stage { padding: 8px; }
   .layer-split-foot { flex-wrap: wrap; gap: 10px; }
   .layer-split-foot > div { margin-left: auto; flex-wrap: wrap; }
 }
+@media (max-width: 760px) { .layer-split-backdrop { padding: 10px; } }
 @media (max-width: 560px) {
   .layer-split-body { display: flex; flex-direction: column; overflow: auto; }
   .layer-split-workspace { flex: 0 0 300px; }

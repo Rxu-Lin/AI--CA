@@ -1,18 +1,4 @@
-export type ParametricBoxPose = 'closed' | 'open' | 'separated'
-
-export type ParametricBoxSettings = {
-  length: number
-  width: number
-  baseHeight: number
-  lidHeight: number
-  thickness: number
-  gap: number
-  pose: ParametricBoxPose
-  baseColor: string
-  lidColor: string
-}
-
-export type ParametricPrimitiveKind = 'cylinder' | 'cuboid'
+export type ParametricPrimitiveKind = 'cylinder' | 'cuboid' | 'sphere'
 
 export type ParametricPrimitiveSettings = {
   kind: ParametricPrimitiveKind
@@ -21,6 +7,8 @@ export type ParametricPrimitiveSettings = {
   length: number
   width: number
   color: string
+  widthSegments?: number
+  heightSegments?: number
 }
 
 export type SavedTransform = {
@@ -40,12 +28,10 @@ export type SavedModel3DSource = {
 }
 
 export type SavedModel3DItem = {
-  kind: 'parametric-box' | 'parametric-part' | 'parametric-primitive' | 'imported-model'
+  kind: 'parametric-primitive' | 'imported-model'
   name: string
   transform: SavedTransform
-  settings?: ParametricBoxSettings
   primitiveSettings?: ParametricPrimitiveSettings
-  part?: 'base' | 'lid'
   color?: string
   source?: SavedModel3DSource
 }
@@ -75,6 +61,48 @@ const storeName = 'scenes'
 const databaseVersion = 1
 const draftSceneId = 'cpd-model3d-scene-v1'
 const memoryFallback = new Map<string, SavedModel3DScene>()
+
+/** Discard retired procedural objects without touching imported models or raster layers. */
+export function cleanModel3DScene(scene: SavedModel3DScene): SavedModel3DScene {
+  if (!Array.isArray(scene?.items)) return scene
+  const supported = new Set(['parametric-primitive', 'imported-model'])
+  const items = scene.items.filter(item => supported.has(item.kind))
+  if (items.length === scene.items.length) return scene
+  const selected = scene.items[scene.selectedIndex]
+  return { ...scene, items, selectedIndex: items.includes(selected) ? items.indexOf(selected) : items.length - 1 }
+}
+
+export async function removeRetiredModel3DData() {
+  const legacy = readLegacyDraft()
+  const cleanLegacy = legacy ? cleanModel3DScene(legacy) : null
+  let hasDraft = false
+  // Commit all updates together, and only rewrite records that contain retired objects.
+  await withSceneStore('readwrite', store => {
+    const request = store.openCursor()
+    request.onsuccess = () => {
+      const cursor = request.result
+      if (!cursor) {
+        // The current IndexedDB draft always takes precedence over a stale backup.
+        if (cleanLegacy && cleanLegacy !== legacy && !hasDraft) store.put(cleanLegacy, draftSceneId)
+        return
+      }
+      if (cursor.key === draftSceneId) hasDraft = true
+      const scene = cursor.value as SavedModel3DScene
+      const clean = cleanModel3DScene(scene)
+      if (clean !== scene) cursor.update(clean)
+      cursor.continue()
+    }
+    return request
+  })
+  memoryFallback.forEach((scene, sceneId) => memoryFallback.set(sceneId, cleanModel3DScene(scene)))
+  if (cleanLegacy && cleanLegacy !== legacy) {
+    try {
+      window.localStorage.removeItem(draftSceneId)
+    } catch {
+      // Keep a blocked backup; committed IndexedDB data still takes precedence.
+    }
+  }
+}
 
 function openSceneDatabase() {
   return new Promise<IDBDatabase>((resolve, reject) => {
@@ -145,7 +173,7 @@ function readLegacyDraft(): SavedModel3DScene | null {
 
 export async function saveModel3DDraft(scene: SavedModel3DScene) {
   // Explicit saves must be durable; the regular scene store's memory fallback is insufficient.
-  await withSceneStore('readwrite', (store) => store.put(scene, draftSceneId))
+  await withSceneStore('readwrite', (store) => store.put(cleanModel3DScene(scene), draftSceneId))
   try {
     window.localStorage.removeItem(draftSceneId)
   } catch {
@@ -157,7 +185,11 @@ export async function readModel3DDraft(): Promise<SavedModel3DScene | null> {
   let storageError: unknown
   try {
     const scene = await withSceneStore<SavedModel3DScene | undefined>('readonly', (store) => store.get(draftSceneId))
-    if (scene) return scene
+    if (scene) {
+      const clean = cleanModel3DScene(scene)
+      if (clean !== scene) await saveModel3DDraft(clean)
+      return clean
+    }
   } catch (reason) {
     storageError = reason
   }
@@ -168,7 +200,7 @@ export async function readModel3DDraft(): Promise<SavedModel3DScene | null> {
     } catch {
       // Keep the original copy and allow editing even when migration cannot be persisted.
     }
-    return legacy
+    return cleanModel3DScene(legacy)
   }
   if (storageError) throw storageError
   return null
@@ -180,6 +212,7 @@ export async function deleteModel3DDraft() {
 }
 
 export async function saveModel3DScene(sceneId: string, scene: SavedModel3DScene) {
+  scene = cleanModel3DScene(scene)
   memoryFallback.set(sceneId, scene)
   try {
     await withSceneStore('readwrite', (store) => store.put(scene, sceneId))
@@ -191,8 +224,13 @@ export async function saveModel3DScene(sceneId: string, scene: SavedModel3DScene
 export async function readModel3DScene(sceneId: string) {
   try {
     const scene = await withSceneStore<SavedModel3DScene | undefined>('readonly', (store) => store.get(sceneId))
-    if (scene) memoryFallback.set(sceneId, scene)
-    return scene || memoryFallback.get(sceneId) || null
+    if (scene) {
+      const clean = cleanModel3DScene(scene)
+      memoryFallback.set(sceneId, clean)
+      if (clean !== scene) await saveModel3DScene(sceneId, clean)
+      return clean
+    }
+    return memoryFallback.get(sceneId) || null
   } catch {
     return memoryFallback.get(sceneId) || null
   }

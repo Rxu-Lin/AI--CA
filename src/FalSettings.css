@@ -1,0 +1,28 @@
+.api-settings-backdrop { z-index: 140; padding: 16px; }
+.api-settings-backdrop .settings-modal { outline: none; }
+.api-settings-tabs { display: flex; gap: 5px; margin: 18px 18px 0; padding: 5px; border: var(--glass-frame-width, 1.2px) solid transparent; border-radius: 14px; background: var(--glass-control-fill) padding-box, var(--glass-edge) border-box; }
+.api-settings-tabs button { flex: 1; padding: 11px 12px; border: 0; border-radius: 10px; background: transparent; color: #a9a9a9; font: inherit; font-size: 12px; cursor: pointer; }
+.api-settings-tabs button[aria-selected=true] { background: #e5e5e5; color: #202020; }
+.fal-settings-content { display: grid; gap: 20px; padding: 24px 22px; }
+.fal-settings-intro { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.fal-settings-intro strong { font-size: 15px; color: #eee; }
+.fal-settings-intro p, .fal-settings-note, .fal-service-cards p { color: #999; font-size: 11px; line-height: 1.7; margin: 7px 0 0; }
+.fal-settings-intro > span { flex-shrink: 0; padding: 6px 10px; border: 1px solid #ffffff1c; border-radius: 9px; color: #bbb; font-size: 11px; }
+.fal-key-input { display: flex; align-items: center; gap: 8px; }
+.fal-key-input input { flex: 1; min-width: 0; }
+.fal-key-input button { display: grid; place-items: center; width: 38px; height: 38px; flex-shrink: 0; color: #bbb; background: #ffffff08; border: 1px solid #ffffff15; border-radius: 10px; cursor: pointer; }
+.fal-key-links { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.fal-key-links a { color: #ddd; font-size: 11px; text-decoration: none; }
+.fal-key-links button, .fal-settings-note button { padding: 0; border: 0; background: none; color: #aaa; font: inherit; font-size: 11px; cursor: pointer; }
+.fal-service-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.fal-service-cards > div { padding: 18px 16px; border: var(--glass-frame-width, 1.2px) solid transparent; border-radius: 16px; background: var(--glass-control-fill) padding-box, var(--glass-edge) border-box; box-shadow: var(--glass-control-shadow); }
+.fal-service-cards svg { color: #aaa; margin-bottom: 12px; }
+.fal-service-cards strong { display: block; color: #ddd; font-size: 12px; font-weight: 500; }
+.fal-settings-error { margin: 0; color: #e5b7b7; font-size: 12px; line-height: 1.7; }
+.fal-service-status { margin-bottom: 14px; padding: 12px; border: var(--glass-frame-width, 1.2px) solid transparent; border-radius: 12px; background: var(--glass-control-fill) padding-box, var(--glass-edge) border-box; }
+.fal-service-status > div { display: flex; align-items: center; gap: 7px; color: #bbb; font-size: 11px; }
+.fal-service-status strong { font-weight: 500; }
+.fal-service-status span { margin-left: auto; font-size: 10px; color: #999; }
+.fal-service-status p { color: #d9aaaa; font-size: 10px; line-height: 1.6; margin: 9px 0; }
+.fal-service-status button { display: block; width: 100%; margin-top: 12px; padding: 8px 10px; border: 1px solid #ffffff1a; border-radius: 9px; background: #ffffff06; color: #ccc; font: inherit; font-size: 11px; cursor: pointer; }
+@media (max-width: 540px) { .fal-service-cards { grid-template-columns: 1fr; }.fal-settings-content { padding: 18px; }.fal-settings-intro { flex-wrap: wrap; } }

@@ -53,6 +53,7 @@ import {
   RefreshCw,
   Rotate3D,
   Save,
+  ScanSearch,
   Settings,
   Trash2,
   Upload,
@@ -85,6 +86,7 @@ import {
   deleteModel3DScene,
   readModel3DScene,
   readModel3DScenes,
+  removeRetiredModel3DData,
   saveModel3DScene,
   saveModel3DScenes,
   type SavedModel3DScene,
@@ -96,6 +98,12 @@ import type { LayerSplitInput } from './LayerSplitStudio'
 import { renderLayerDocument, type LayerDocument, type LayerSplitJob, type RasterLayer } from './layerDocument'
 import { collectLayerSplit, layerRequest } from './layerSplitClient'
 import { mapFineDraftImages, type FineLayerDraft } from './fineLayerDocument'
+import { collectUpscale, upscaleRequest } from './upscaleClient'
+import { upscaleDimensions, upscaleModes, type UpscaleInput, type UpscaleJob } from './upscale'
+import UpscaleStudio from './UpscaleStudio'
+import UpscaleStudioBoundary from './UpscaleStudioBoundary'
+import ApiSettingsDialog, { type ApiSettingsTab } from './ApiSettingsDialog'
+import FalSettings from './FalSettings'
 
 const Model3DStudio = lazy(() => import('./Model3DStudio'))
 const SketchStudio = lazy(() => import('./SketchStudio'))
@@ -292,6 +300,7 @@ type WorkflowNodeData = {
   multiAngleSettings?: MultiAngleResult
   layerDocument?: LayerDocument
   layerSplitJob?: LayerSplitJob
+  upscaleJob?: UpscaleJob
   fineLayerDraft?: FineLayerDraft
   layerElementName?: string
   brushSize?: number
@@ -339,6 +348,7 @@ type WorkflowNodeData = {
   onOpenElementEdit?: (id: string) => void
   onOpenMultiAngle?: (id: string) => void
   onOpenLayerSplit?: (id: string) => void
+  onOpenUpscale?: (id: string) => void
   onChangePrompt?: (id: string, prompt: string, mentions?: PromptMentionBinding[]) => void
   onLocatePromptMention?: (nodeId: string) => void
   onChangeOutpaintInsets?: (id: string, insets: OutpaintInsets) => void
@@ -806,11 +816,25 @@ const apiMartModels: ApiMartModelOption[] = [
     maxReferenceImages: 16,
   },
   {
-    id: 'gpt-image-2.6',
-    label: 'GPT Image 2.6',
+    id: 'gpt-image-2.6-sunburst',
+    label: 'GPT Image 2.6 Sunburst',
     resolutions: ['1K', '2K', '4K'],
     defaultResolution: '1K',
     maxReferenceImages: 16,
+  },
+  {
+    id: 'gpt-image-2.6-flare',
+    label: 'GPT Image 2.6 Flare',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+    maxReferenceImages: 16,
+  },
+  {
+    id: 'seedream-5-5',
+    label: 'Seedream 5.5',
+    resolutions: ['1K', '1.5K', '2K'],
+    defaultResolution: '2K',
+    maxReferenceImages: 10,
   },
   {
     id: 'seedream-5-0-pro',
@@ -884,7 +908,9 @@ const apiMartVideoModels: ApiMartVideoModelOption[] = [
 ]
 
 function findApiMartModel(model: string) {
-  return apiMartModels.find((option) => option.id === model) ?? apiMartModels[0]
+  // Saved projects used the family name before APIMart split its two variants.
+  const modelId = model === 'gpt-image-2.6' ? 'gpt-image-2.6-flare' : model
+  return apiMartModels.find((option) => option.id === modelId) ?? apiMartModels[0]
 }
 
 function findApiMartVideoModel(model?: string) {
@@ -892,6 +918,7 @@ function findApiMartVideoModel(model?: string) {
 }
 
 function apiModelDisplayName(model: string) {
+  if (model === 'gpt-image-2.6') return findApiMartModel(model).label
   const apiMartModel = apiMartModels.find((option) => option.id === model)
   if (apiMartModel) return apiMartModel.label
   const apiMartVideoModel = apiMartVideoModels.find((option) => option.id === model)
@@ -1285,6 +1312,7 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
     onOpenElementEdit,
     onOpenMultiAngle,
     onOpenLayerSplit,
+    onOpenUpscale,
     onChangePrompt,
     onLocatePromptMention,
     onChangeOutpaintInsets,
@@ -1316,6 +1344,7 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
   void onOpenElementEdit
   void onOpenMultiAngle
   void onOpenLayerSplit
+  void onOpenUpscale
   void onChangePrompt
   void onLocatePromptMention
   void onChangeOutpaintInsets
@@ -2428,7 +2457,8 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const isElementEditResult = isImage && Boolean(data.elementEditOperations?.length)
   const isMultiAngleResult = isImage && Boolean(data.multiAngleSettings)
   const isLayerSplitResult = Boolean(data.layerDocument || data.layerSplitJob)
-  const isDirectEditResult = isElementEditResult || isMultiAngleResult || isLayerSplitResult || Boolean(data.layerElementName)
+  const isUpscaleResult = Boolean(data.upscaleJob)
+  const isDirectEditResult = isElementEditResult || isMultiAngleResult || isLayerSplitResult || isUpscaleResult || Boolean(data.layerElementName)
   const supportsPromptMentions = (isImage || isVideo) && !isDirectEditResult
   const isReference = data.kind === 'reference'
   const isVideoReference = data.kind === 'video-reference'
@@ -2473,7 +2503,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const modelOptions = data.generationModelOptions ?? (isVideo ? apiMartVideoModels : usesApiMartNodeSettings ? apiMartModels : [{ id: configuredModelName, label: apiModelDisplayName(configuredModelName) || '当前模型' }])
   const selectedModelId = isVideo ? videoModelConfig.id : usesApiMartNodeSettings ? imageModelConfig.id : configuredModelName
   const selectedModelLabel = modelOptions.find((model) => model.id === selectedModelId)?.label || apiModelDisplayName(configuredModelName) || '当前模型'
-  const nodeTitle = data.layerElementName ? `图层 · ${data.layerElementName}` : isLayerSplitResult
+  const nodeTitle = isUpscaleResult ? `高清修复 · ${data.upscaleJob!.factor}× · ${nodePixelSize.width} × ${nodePixelSize.height}` : data.layerElementName ? `图层 · ${data.layerElementName}` : isLayerSplitResult
     ? `分层结果 · ${data.layerDocument ? `${data.layerDocument.layers.length} 个图层` : '图层拆分'}`
     : isElementEditResult
     ? `元素编辑结果 · ${sourceWidth} × ${sourceHeight}`
@@ -2790,6 +2820,9 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             <Layers size={14} />
             {isLayerSplitResult ? '编辑图层 / PSD' : '图层拆分'}
           </button>
+          <button type="button" disabled={!isUpscaleResult && (!data.imageUrl || isGenerating)} title={isUpscaleResult ? '查看高清修复与原图对比' : '保真放大与高清修复'} onClick={() => data.onOpenUpscale?.(nodeId)}>
+            <ScanSearch size={14} />高清修复
+          </button>
         </div>
       )}
       {(isImage || isVideo || isOutpaint) && (
@@ -2936,9 +2969,9 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             aria-live="polite"
           >
             {isGenerating ? (
-              <div className="node-generation-field" role="status" aria-label={isLayerSplitResult ? '正在拆分图层' : '正在生成图像'}>
+              <div className="node-generation-field" role="status" aria-label={isUpscaleResult ? '正在高清修复' : isLayerSplitResult ? '正在拆分图层' : '正在生成图像'}>
                 <span className="node-generation-frame" aria-hidden="true" />
-                <span className="node-generation-copy">{isLayerSplitResult ? '正在拆分图层…' : '正在生成...'}</span>
+                <span className="node-generation-copy">{isUpscaleResult ? '正在高清修复…' : isLayerSplitResult ? '正在拆分图层…' : '正在生成...'}</span>
               </div>
             ) : (
               <>
@@ -3019,6 +3052,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
       {(
         <>
           <div className="node-actions">
+            {isUpscaleResult && <button className="node-layer-edit-button nodrag nopan" type="button" title="查看高清修复任务和前后对比" onClick={() => data.onOpenUpscale?.(nodeId)}><ScanSearch size={14} /><span>{data.imageUrl ? '修复对比' : '查看任务'}</span></button>}
             {isLayerSplitResult && (
               <button
                 className="node-layer-edit-button nodrag nopan"
@@ -3302,6 +3336,7 @@ export default function App() {
   const [isGenerating, setIsGenerating] = useState(false)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
+  const [settingsTab, setSettingsTab] = useState<ApiSettingsTab>('generation')
   const [showModelStudio, setShowModelStudio] = useState(false)
   const [sketchSession, setSketchSession] = useState<{ nodeId: string | null; document?: SketchDocument } | null>(null)
   const [elementEditSession, setElementEditSession] = useState<{
@@ -3315,6 +3350,9 @@ export default function App() {
   const [layerSplitSession, setLayerSplitSession] = useState<{ nodeId: string; sourceImageUrl: string } | null>(null)
   const [layerJobProgress, setLayerJobProgress] = useState<Record<string, string>>({})
   const activeLayerRunsRef = useRef(new Map<string, AbortController>())
+  const [upscaleSession, setUpscaleSession] = useState<{ nodeId: string; sourceImageUrl: string } | null>(null)
+  const [upscaleProgress, setUpscaleProgress] = useState<Record<string, string>>({})
+  const activeUpscaleRunsRef = useRef(new Map<string, AbortController>())
   const [model3DEditSession, setModel3DEditSession] = useState<{
     nodeId: string | null
     sceneId: string | null
@@ -3343,6 +3381,11 @@ export default function App() {
   const [openedProjectFileName, setOpenedProjectFileName] = useState('')
   const [, setToast] = useState('已准备好，默认使用本地模拟生成。')
 
+  function openApiSettings(tab?: ApiSettingsTab) {
+    if (tab) setSettingsTab(tab)
+    setShowSettings(true)
+  }
+
   const imageGenerationModelOptions = useMemo<MultiAngleModelOption[]>(() => (
     apiConfig.mode === 'apimart'
       ? apiMartModels.map(({ id: modelId, label }) => ({ id: modelId, label }))
@@ -3354,6 +3397,10 @@ export default function App() {
   ), [apiConfig.mode, apiConfig.model, change2ProModels])
 
   const markDirty = useCallback(() => setDirty(true), [])
+
+  useEffect(() => {
+    void removeRetiredModel3DData().catch(() => setToast('旧 3D 数据暂未清理，打开模型时会重新处理。'))
+  }, [])
 
   useEffect(() => {
     removedApiModes.forEach((mode) => window.localStorage.removeItem(`${API_PROFILE_STORAGE_KEY_PREFIX}${mode}`))
@@ -3416,7 +3463,7 @@ export default function App() {
   }, [nodes, edges, setNodes, setEdges, markDirty])
 
   useEffect(() => {
-    if ((!showSettings && !multiAngleSession) || apiConfig.mode !== 'change2pro') return
+    if (((!showSettings || settingsTab !== 'generation') && !multiAngleSession) || apiConfig.mode !== 'change2pro') return
     if (apiConfig.apiKey.trim().length < 8) {
       setChange2ProModels([])
       setChange2ProModelStatus('idle')
@@ -3428,7 +3475,7 @@ export default function App() {
       void loadChange2ProModels()
     }, 500)
     return () => window.clearTimeout(timer)
-  }, [apiConfig.apiKey, apiConfig.change2ProFamily, apiConfig.mode, loadChange2ProModels, multiAngleSession, showSettings])
+  }, [apiConfig.apiKey, apiConfig.change2ProFamily, apiConfig.mode, loadChange2ProModels, multiAngleSession, showSettings, settingsTab])
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<WorkflowNode>[]) => {
@@ -3697,7 +3744,7 @@ export default function App() {
 
   const handleDeleteKey = useCallback(
     (event: KeyboardEvent) => {
-      if (event.key !== 'Delete' || showSettings || showModelStudio || sketchSession || elementEditSession || multiAngleSession || layerSplitSession || groupDialog || historyMediaPreview || lightDirectionNodeId || isKeyboardControlTarget(event.target)) return
+      if (event.key !== 'Delete' || showSettings || showModelStudio || sketchSession || elementEditSession || multiAngleSession || layerSplitSession || upscaleSession || groupDialog || historyMediaPreview || lightDirectionNodeId || isKeyboardControlTarget(event.target)) return
 
       const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id)
       if (selectedNodeId && !selectedNodeIds.includes(selectedNodeId)) selectedNodeIds.push(selectedNodeId)
@@ -3706,7 +3753,7 @@ export default function App() {
       event.preventDefault()
       deleteNodesByIds(selectedNodeIds)
     },
-    [deleteNodesByIds, elementEditSession, groupDialog, historyMediaPreview, lightDirectionNodeId, multiAngleSession, layerSplitSession, nodes, selectedNodeId, showModelStudio, sketchSession, showSettings],
+    [deleteNodesByIds, elementEditSession, groupDialog, historyMediaPreview, lightDirectionNodeId, multiAngleSession, layerSplitSession, upscaleSession, nodes, selectedNodeId, showModelStudio, sketchSession, showSettings],
   )
 
   useEffect(() => {
@@ -4091,6 +4138,81 @@ export default function App() {
     try {
       setLayerSplitSession({ nodeId, sourceImageUrl: await imageAsDataUrl(imageUrl) })
     } catch (error) { setToast(error instanceof Error ? error.message : '分层原图读取失败。') }
+  }
+
+  async function openUpscaleFromNode(nodeId: string) {
+    const source = nodes.find(node => node.id === nodeId)
+    const imageUrl = source?.data.upscaleJob ? source.data.sourceImageUrl : source?.data.imageUrl
+    if (!imageUrl) return
+    try { setUpscaleSession({ nodeId, sourceImageUrl: await imageAsDataUrl(imageUrl) }) }
+    catch (error) { setToast(error instanceof Error ? error.message : '高清修复原图读取失败。') }
+  }
+
+  useEffect(() => {
+    const ids = new Set(nodes.map(node => node.id))
+    for (const [nodeId, controller] of activeUpscaleRunsRef.current) {
+      if (!ids.has(nodeId)) { controller.abort(); activeUpscaleRunsRef.current.delete(nodeId) }
+    }
+  }, [nodes])
+  useEffect(() => {
+    const active = activeUpscaleRunsRef.current
+    return () => { for (const controller of active.values()) controller.abort(); active.clear() }
+  }, [])
+
+  async function finishUpscale(nodeId: string, job: UpscaleJob) {
+    if (activeUpscaleRunsRef.current.has(nodeId)) return
+    const controller = new AbortController()
+    activeUpscaleRunsRef.current.set(nodeId, controller)
+    setUpscaleProgress(current => ({ ...current, [nodeId]: '正在获取高清修复任务…' }))
+    setNodes(current => current.map(node => node.id === nodeId ? { ...node, data: { ...node.data, status: 'generating', error: undefined } } : node))
+    try {
+      const result = await collectUpscale(job, text => setUpscaleProgress(current => ({ ...current, [nodeId]: text })), controller.signal)
+      if (controller.signal.aborted) return
+      setNodes(current => current.map(node => node.id === nodeId && node.data.upscaleJob?.requestId === job.requestId ? {
+        ...node, data: { ...node.data, imageUrl: result.imageUrl, size: `${result.width}x${result.height}`, status: 'done', error: undefined },
+      } : node))
+      const mode = upscaleModes.find(item => item.id === job.mode)!
+      setHistory(current => [{ id: nodeId, prompt: `${mode.label} · ${job.factor}×`, model: `Topaz ${mode.model}`, size: `${result.width}x${result.height}`, imageUrl: result.imageUrl, status: '成功', createdAt: new Date().toLocaleString('zh-CN') }, ...current.filter(item => item.id !== nodeId)])
+      markDirty()
+      setToast(`高清修复完成：${result.width} × ${result.height}，可打开“修复对比”查看细节。`)
+    } catch (error) {
+      if (controller.signal.aborted) return
+      setNodes(current => current.map(node => node.id === nodeId ? { ...node, data: { ...node.data, status: 'error', error: error instanceof Error ? error.message : '高清修复失败，可继续获取结果。' } } : node))
+      markDirty()
+    } finally {
+      if (activeUpscaleRunsRef.current.get(nodeId) === controller) {
+        activeUpscaleRunsRef.current.delete(nodeId)
+        setUpscaleProgress(current => { const next = { ...current }; delete next[nodeId]; return next })
+      }
+    }
+  }
+
+  async function submitUpscale(input: UpscaleInput) {
+    const source = nodes.find(node => node.id === upscaleSession?.nodeId)
+    if (!source || source.data.upscaleJob) throw new Error('请从原图打开高清修复。')
+    const output = upscaleDimensions(input.width, input.height, input.factor)
+    const sourceImageUrl = await cacheCanvasImage(input.imageUrl)
+    const result = await upscaleRequest<{ requestId: string; width: number; height: number }>('submit', input)
+    const { imageUrl: _imageUrl, ...settings } = input
+    void _imageUrl
+    const job: UpscaleJob = { ...settings, requestId: result.requestId, width: result.width, height: result.height }
+    const nodeId = id('upscale-result'), position = getAbsoluteNodePosition(source, nodes)
+    const mode = upscaleModes.find(item => item.id === input.mode)!
+    const resultNode: WorkflowNode = {
+      id: nodeId, type: 'workflow', selected: true,
+      position: findFreeWorkflowNodePosition({ x: position.x + 430, y: position.y }, { width: 330, height: 500 }, nodes),
+      data: { kind: 'image', title: '高清修复', model: `Topaz ${mode.model}`, status: 'generating', sourceImageUrl,
+        upscaleJob: job, sourceWidth: input.width, sourceHeight: input.height, size: `${output.width}x${output.height}`,
+        prompt: source.data.prompt, generationPrompt: source.data.generationPrompt,
+        sourceName: source.data.sourceName || source.data.title, createdAt: new Date().toLocaleString('zh-CN') },
+    }
+    setNodes(current => [...current.map(node => ({ ...node, selected: false })), resultNode])
+    setEdges(current => [...current, { id: id('edge'), source: source.id, sourceHandle: 'output', target: nodeId, targetHandle: `${imageInputHandlePrefix}1`, markerEnd: { type: MarkerType.ArrowClosed, color: workflowEdgeColor }, style: { stroke: workflowEdgeColor, strokeWidth: 1.6 } }])
+    setSelectedNodeId(nodeId)
+    setUpscaleSession({ nodeId, sourceImageUrl: input.imageUrl })
+    markDirty()
+    void finishUpscale(nodeId, job)
+    window.setTimeout(() => { void flowInstance?.fitView({ nodes: [{ id: source.id }, { id: nodeId }], padding: 0.2, maxZoom: 0.92, duration: 180 }) }, 0)
   }
 
   useEffect(() => {
@@ -4642,7 +4764,7 @@ export default function App() {
       ? findApiMartVideoModel(node.data.model || apiConfig.videoModel)
       : null
     const imageInputSlots = usesOrderedImageSlots
-      ? referenceInputSlots(connectedImageIndexes, imageInputHandlePrefix, node.data.layerSplitJob || node.data.layerDocument ? 1 : videoModel?.maxReferenceImages)
+      ? referenceInputSlots(connectedImageIndexes, imageInputHandlePrefix, node.data.layerSplitJob || node.data.layerDocument || node.data.upscaleJob ? 1 : videoModel?.maxReferenceImages)
       : [{ id: 'image', index: 1, connected: connectedImageIndexes.has(1) }]
     const connectedVideoIndexes = new Set(
       videoInputEdges.map((edge, index) => videoInputHandleIndex(edge.targetHandle) ?? index + 1),
@@ -4661,7 +4783,7 @@ export default function App() {
         onEnsureGenerationPanelVisible: ensureGenerationPanelVisible,
         generationModelOptions: node.data.kind === 'video' ? apiMartVideoModels : imageGenerationModelOptions,
         imageResolutionOptions: apiConfig.mode === 'apimart' ? findApiMartModel(node.data.model || apiConfig.model).resolutions : apiConfig.mode === 'change2pro' && change2ProSupportsImageSize(apiConfig.model) ? change2ProImageSizes : [],
-        model: node.data.kind === 'video'
+        model: node.data.upscaleJob ? node.data.model : node.data.kind === 'video'
           ? (node.data.model || apiConfig.videoModel)
           : node.data.kind === 'image'
             ? (apiConfig.mode === 'apimart' ? node.data.model || apiConfig.model : apiConfig.model)
@@ -4694,11 +4816,17 @@ export default function App() {
         onEditModel3D: (nodeId: string) => void openModel3DFromNode(nodeId),
         onEditSketch: (nodeId: string) => {
           const source = nodes.find(node => node.id === nodeId)
-          if (source?.data.sketch) setSketchSession({ nodeId, document: source.data.sketch })
+          if (source?.data.sketch) {
+            const document = source.data.sketch
+            setSketchSession({ nodeId, document: apiConfig.mode === 'apimart' && document.model === 'gpt-image-2.6'
+              ? { ...document, model: findApiMartModel(document.model).id }
+              : document })
+          }
         },
         onOpenElementEdit: (nodeId: string) => void openElementEditFromNode(nodeId),
         onOpenMultiAngle: (nodeId: string) => void openMultiAngleFromNode(nodeId),
         onOpenLayerSplit: (nodeId: string) => void openLayerSplitFromNode(nodeId),
+        onOpenUpscale: (nodeId: string) => void openUpscaleFromNode(nodeId),
         onChangePrompt: changeNodePrompt,
         onLocatePromptMention: locatePromptMention,
         onChangeOutpaintInsets: changeNodeOutpaintInsets,
@@ -5502,6 +5630,7 @@ export default function App() {
 
   function generateFromNode(nodeId: string) {
     const node = nodes.find((item) => item.id === nodeId)
+    if (node?.data.upscaleJob) { void openUpscaleFromNode(nodeId); return }
     if (node?.data.kind === 'image') {
       void generateImageInNode(node.id)
       return
@@ -5916,6 +6045,10 @@ export default function App() {
       await saveModel3DScenes(project.model3DScenes)
     }
     setProjectName(project.projectName)
+    for (const controller of activeUpscaleRunsRef.current.values()) controller.abort()
+    activeUpscaleRunsRef.current.clear()
+    setUpscaleSession(null)
+    setUpscaleProgress({})
     setNodes(project.nodes)
     setEdges(project.edges)
     setHistory(project.history)
@@ -6074,7 +6207,7 @@ export default function App() {
     const ignoreClipboardEvent = (event: ClipboardEvent) => {
       const target = event.target instanceof Element ? event.target : null
       return event.defaultPrevented || Boolean(target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) ||
-        Boolean(showSettings || showModelStudio || sketchSession || elementEditSession || multiAngleSession || layerSplitSession || showHistoryPanel || historyMediaPreview || groupDialog || lightDirectionNodeId)
+        Boolean(showSettings || showModelStudio || sketchSession || elementEditSession || multiAngleSession || layerSplitSession || upscaleSession || showHistoryPanel || historyMediaPreview || groupDialog || lightDirectionNodeId)
     }
     const handleCopyMedia = (event: ClipboardEvent) => {
       if (ignoreClipboardEvent(event) || window.getSelection()?.toString()) return
@@ -6159,6 +6292,7 @@ export default function App() {
     markDirty,
     multiAngleSession,
     layerSplitSession,
+    upscaleSession,
     nodes.length,
     setNodes,
     pasteNodeResults,
@@ -6514,6 +6648,7 @@ export default function App() {
     ? nodes.find((node) => node.id === multiAngleSession.nodeId) ?? null
     : null
   const layerSplitNode = layerSplitSession ? nodes.find(node => node.id === layerSplitSession.nodeId) : null
+  const upscaleNode = upscaleSession ? nodes.find(node => node.id === upscaleSession.nodeId) : null
 
   return (
     <main className="canvas-app">
@@ -6542,7 +6677,7 @@ export default function App() {
             <Upload size={15} />
             导入
           </button>
-          <button type="button" onClick={() => setShowSettings(true)} title="API 设置">
+          <button type="button" onClick={() => openApiSettings()} title="API 设置">
             <Settings size={15} />
             设置
           </button>
@@ -6558,7 +6693,7 @@ export default function App() {
           <button
             className={`api-status-button ${apiConfig.mode} ${apiConfig.apiKey ? 'configured' : ''}`}
             type="button"
-            onClick={() => setShowSettings(true)}
+            onClick={() => openApiSettings('generation')}
             title="API 状态，点击填写 API Key"
           >
             <span className="api-status-dot" />
@@ -7116,7 +7251,9 @@ export default function App() {
             sourceImageUrl={multiAngleSession.sourceImageUrl}
             sourceName={multiAngleNode.data.sourceName || multiAngleNode.data.title}
             models={imageGenerationModelOptions}
-            initialModelId={multiAngleNode.data.model || apiConfig.model}
+            initialModelId={apiConfig.mode === 'apimart'
+              ? findApiMartModel(multiAngleNode.data.model || apiConfig.model).id
+              : multiAngleNode.data.model || apiConfig.model}
             modelsLoading={apiConfig.mode === 'change2pro' && change2ProModelStatus === 'loading'}
             busy={isGenerating}
             onClose={() => setMultiAngleSession(null)}
@@ -7125,6 +7262,12 @@ export default function App() {
         </Suspense>
       )}
 
+      {upscaleSession && upscaleNode && <UpscaleStudioBoundary key={upscaleSession.nodeId} onClose={() => setUpscaleSession(null)}>
+        <UpscaleStudio sourceImageUrl={upscaleSession.sourceImageUrl} sourceName={upscaleNode.data.sourceName || upscaleNode.data.title}
+          job={upscaleNode.data.upscaleJob} resultImageUrl={upscaleNode.data.upscaleJob ? upscaleNode.data.imageUrl : undefined}
+          running={Boolean(upscaleProgress[upscaleNode.id])} progress={upscaleProgress[upscaleNode.id]} error={upscaleNode.data.upscaleJob ? upscaleNode.data.error : undefined}
+          onRun={submitUpscale} onResume={() => { if (upscaleNode.data.upscaleJob) void finishUpscale(upscaleNode.id, upscaleNode.data.upscaleJob) }} onClose={() => setUpscaleSession(null)} onOpenApiSettings={() => openApiSettings('fal')} />
+      </UpscaleStudioBoundary>}
       {layerSplitSession && layerSplitNode && (
         <Suspense fallback={<div className="modal-backdrop" role="status">正在加载图层拆分…</div>}>
           <LayerSplitStudio
@@ -7144,6 +7287,7 @@ export default function App() {
             onSave={saveLayerSplit}
             onExtract={extractLayerToCanvas}
             onClose={() => setLayerSplitSession(null)}
+            onOpenApiSettings={() => openApiSettings('fal')}
           />
         </Suspense>
       )}
@@ -7178,18 +7322,8 @@ export default function App() {
       )}
 
       {showSettings && (
-        <div className="modal-backdrop" role="presentation">
-          <section className="settings-modal" role="dialog" aria-modal="true" aria-label="API 设置">
-            <div className="modal-head">
-              <div>
-                <h2>API 设置</h2>
-                <p>支持 GA、Change2Pro 与 API Mart 图像 / 视频接口。</p>
-              </div>
-              <button type="button" onClick={() => setShowSettings(false)} title="关闭">
-                <X size={18} />
-              </button>
-            </div>
-
+        <ApiSettingsDialog tab={settingsTab} onTabChange={setSettingsTab} onClose={() => setShowSettings(false)}>
+          {settingsTab === 'fal' ? <FalSettings onSaved={() => setShowSettings(false)} /> : <>
             <div className="settings-grid">
               <div className="field">
                 <span>模式</span>
@@ -7317,8 +7451,8 @@ export default function App() {
                 完成
               </button>
             </div>
-          </section>
-        </div>
+          </>}
+        </ApiSettingsDialog>
       )}
     </main>
   )

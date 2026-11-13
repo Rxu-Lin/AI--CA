@@ -26,6 +26,7 @@ export default function Preview() {
     onSave={async next => setDoc(next)}
     onExtract={async () => {}}
     onClose={() => setOpen(false)}
+    onOpenApiSettings={() => {}}
   />}</main>
 }
 const previewRoot = createRoot(document.getElementById('root')!)

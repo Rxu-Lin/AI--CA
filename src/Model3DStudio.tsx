@@ -16,6 +16,7 @@ import {
   RotateCw,
   Save,
   Sun,
+  Circle,
   Trash2,
   Upload,
   X,
@@ -25,9 +26,9 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
 import UnifiedRange from './UnifiedRange'
 import { cacheModelFile, createStaticModelSnapshot, disposeStaticSnapshot, formatModelBytes, optimizeModelSnapshot, parseModelBuffer, persistModelSource } from './model3dAssets'
-import { deleteModel3DDraft, model3DStorageErrorMessage, readModel3DDraft, saveModel3DDraft } from './model3dSceneStore'
+import { cleanModel3DScene, deleteModel3DDraft, model3DStorageErrorMessage, readModel3DDraft, saveModel3DDraft } from './model3dSceneStore'
+import { createPrimitiveGeometry, normalizePrimitiveSettings, primitiveDefaults, primitiveLabels, primitiveParameters } from './model3dPrimitives'
 import type {
-  ParametricBoxSettings,
   ParametricPrimitiveSettings,
   SavedModel3DItem,
   SavedModel3DScene,
@@ -49,17 +50,6 @@ type ModelStats = {
   triangles: number
 }
 
-type ParametricBoxData = {
-  settings: ParametricBoxSettings
-  baseMaterial: THREE.MeshStandardMaterial
-  lidMaterial: THREE.MeshStandardMaterial
-}
-
-type ParametricBoxPartData = {
-  part: 'base' | 'lid'
-  settings: ParametricBoxSettings
-}
-
 type ParametricPrimitiveData = {
   settings: ParametricPrimitiveSettings
 }
@@ -71,8 +61,6 @@ type SceneItem = {
   object: THREE.Object3D
   material: THREE.MeshStandardMaterial
   stats: ModelStats
-  parametricBox?: ParametricBoxData
-  parametricBoxPart?: ParametricBoxPartData
   parametricPrimitive?: ParametricPrimitiveData
   source?: SavedModel3DSource
 }
@@ -83,7 +71,6 @@ type SceneItemSnapshot = {
   quaternion: [number, number, number, number]
   scale: [number, number, number]
   color: string
-  parametricBox?: ParametricBoxSettings
   parametricPrimitive?: ParametricPrimitiveSettings
 }
 
@@ -144,35 +131,6 @@ const viewportPresets: ViewportPreset[] = [
   { id: 'portrait-tall', label: '2:3', width: 800, height: 1200 },
 ]
 
-const defaultParametricBoxSettings: ParametricBoxSettings = {
-  length: 320,
-  width: 240,
-  baseHeight: 120,
-  lidHeight: 55,
-  thickness: 12,
-  gap: 6,
-  pose: 'separated',
-  baseColor: '#FFFFFF',
-  lidColor: '#FFFFFF',
-}
-
-const defaultCylinderSettings: ParametricPrimitiveSettings = {
-  kind: 'cylinder',
-  radius: 100,
-  height: 220,
-  length: 200,
-  width: 200,
-  color: '#FFFFFF',
-}
-
-const defaultCuboidSettings: ParametricPrimitiveSettings = {
-  kind: 'cuboid',
-  radius: 100,
-  height: 180,
-  length: 260,
-  width: 200,
-  color: '#FFFFFF',
-}
 
 const defaultModelColor = '#ffffff'
 const defaultBackgroundColor = '#161616'
@@ -267,35 +225,6 @@ function disposeObjectGeometries(object: THREE.Object3D) {
   })
 }
 
-function addBoxPanel(
-  group: THREE.Group,
-  size: [number, number, number],
-  position: [number, number, number],
-  material: THREE.MeshStandardMaterial,
-) {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), material)
-  mesh.position.set(...position)
-  mesh.castShadow = true
-  mesh.receiveShadow = true
-  group.add(mesh)
-}
-
-function buildOpenBoxGeometry(
-  group: THREE.Group,
-  dimensions: { length: number; width: number; height: number; thickness: number; inverted?: boolean },
-  material: THREE.MeshStandardMaterial,
-) {
-  const { length, width, height, thickness, inverted = false } = dimensions
-  const wallHeight = Math.max(thickness, height - thickness)
-  const wallCenterY = inverted ? wallHeight / 2 : thickness + wallHeight / 2
-  const panelY = inverted ? height - thickness / 2 : thickness / 2
-  addBoxPanel(group, [length, thickness, width], [0, panelY, 0], material)
-  addBoxPanel(group, [length, wallHeight, thickness], [0, wallCenterY, (width - thickness) / 2], material)
-  addBoxPanel(group, [length, wallHeight, thickness], [0, wallCenterY, -(width - thickness) / 2], material)
-  addBoxPanel(group, [thickness, wallHeight, Math.max(thickness, width - thickness * 2)], [(length - thickness) / 2, wallCenterY, 0], material)
-  addBoxPanel(group, [thickness, wallHeight, Math.max(thickness, width - thickness * 2)], [-(length - thickness) / 2, wallCenterY, 0], material)
-}
-
 function savedTransformFromObject(object: THREE.Object3D): SavedTransform {
   return {
     position: [object.position.x, object.position.y, object.position.z],
@@ -327,13 +256,12 @@ function transformValue(value: number) {
 function sceneSnapshotSignature(snapshot: SceneHistorySnapshot) {
   return JSON.stringify({
     selectedItemId: snapshot.selectedItemId,
-    items: snapshot.items.map(({ item, position, quaternion, scale, color, parametricBox, parametricPrimitive }) => ({
+    items: snapshot.items.map(({ item, position, quaternion, scale, color, parametricPrimitive }) => ({
       id: item.id,
       position,
       quaternion,
       scale,
       color,
-      parametricBox,
       parametricPrimitive,
     })),
   })
@@ -401,23 +329,6 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     const runtime = runtimeRef.current
     if (!runtime) return null
     const items = sceneItemsRef.current.flatMap<SavedModel3DItem>((item) => {
-      if (item.parametricBox) {
-        return [{
-          kind: 'parametric-box',
-          name: item.name,
-          transform: savedTransformFromObject(item.object),
-          settings: { ...item.parametricBox.settings },
-        }]
-      }
-      if (item.parametricBoxPart) {
-        return [{
-          kind: 'parametric-part',
-          name: item.name,
-          transform: savedTransformFromObject(item.object),
-          settings: { ...item.parametricBoxPart.settings },
-          part: item.parametricBoxPart.part,
-        }]
-      }
       if (item.parametricPrimitive) {
         return [{
           kind: 'parametric-primitive',
@@ -565,7 +476,6 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
         quaternion: [item.object.quaternion.x, item.object.quaternion.y, item.object.quaternion.z, item.object.quaternion.w],
         scale: [item.object.scale.x, item.object.scale.y, item.object.scale.z],
         color: `#${item.material.color.getHexString()}`,
-        parametricBox: item.parametricBox ? { ...item.parametricBox.settings } : undefined,
         parametricPrimitive: item.parametricPrimitive ? { ...item.parametricPrimitive.settings } : undefined,
       })),
     }
@@ -575,22 +485,31 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     const history = sceneHistoryRef.current
     if (history.length && sceneSnapshotSignature(history.at(-1)!) === sceneSnapshotSignature(snapshot)) return
     sceneHistoryRef.current = [...history.slice(-49), snapshot]
+    releaseUnusedSceneItems()
+  }
+
+  function releaseUnusedSceneItems() {
+    const retained = new Set(sceneItemsRef.current)
+    for (const snapshot of [...sceneHistoryRef.current, transformStartSnapshotRef.current, parameterEditSnapshotRef.current]) {
+      snapshot?.items.forEach(({ item }) => retained.add(item))
+    }
+    allSceneItemsRef.current.forEach(item => {
+      if (retained.has(item)) return
+      disposeModel(item.object, item.material)
+      allSceneItemsRef.current.delete(item)
+    })
   }
 
   function restoreSceneSnapshot(snapshot: SceneHistorySnapshot) {
     const runtime = runtimeRef.current
     if (!runtime) return
-    const restoredItems = snapshot.items.map(({ item, position, quaternion, scale, color, parametricBox, parametricPrimitive }) => {
+    const restoredItems = snapshot.items.map(({ item, position, quaternion, scale, color, parametricPrimitive }) => {
       if (item.object.parent !== runtime.scene) runtime.scene.add(item.object)
       item.object.position.fromArray(position)
       item.object.quaternion.fromArray(quaternion)
       item.object.scale.fromArray(scale)
       item.material.color.set(color)
       item.material.needsUpdate = true
-      if (parametricBox && item.parametricBox) {
-        item.parametricBox.settings = { ...parametricBox }
-        rebuildParametricBox(item)
-      }
       if (parametricPrimitive && item.parametricPrimitive) {
         item.parametricPrimitive.settings = { ...parametricPrimitive }
         rebuildParametricPrimitive(item)
@@ -619,6 +538,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     if (!snapshot) return
     sceneHistoryRef.current = sceneHistoryRef.current.slice(0, -1)
     restoreSceneSnapshot(snapshot)
+    releaseUnusedSceneItems()
   }
   undoSceneRef.current = undoScene
 
@@ -944,9 +864,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     runtime.keyLight.intensity = lightEnabled ? defaultKeyLightIntensity * intensityScale : 0
     runtime.rimLight.intensity = lightEnabled ? defaultRimLightIntensity * intensityScale : 0
     sceneItemsRef.current.forEach((item) => {
-      const materials = item.parametricBox
-        ? [item.parametricBox.baseMaterial, item.parametricBox.lidMaterial]
-        : [item.material]
+      const materials = [item.material]
       materials.forEach((material) => {
         material.emissive.set(0x000000)
         material.emissiveIntensity = 0
@@ -1020,16 +938,15 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
   function rebuildParametricPrimitive(item: SceneItem) {
     const data = item.parametricPrimitive
     if (!data) return
-    const settings = data.settings
+    const settings = normalizePrimitiveSettings(data.settings)
+    data.settings = settings
     const root = item.object as THREE.Group
     disposeObjectGeometries(root)
     root.clear()
     const unit = 0.01
-    const geometry = settings.kind === 'cylinder'
-      ? new THREE.CylinderGeometry(settings.radius * unit, settings.radius * unit, settings.height * unit, 64)
-      : new THREE.BoxGeometry(settings.length * unit, settings.height * unit, settings.width * unit)
+    const geometry = createPrimitiveGeometry(settings)
     const mesh = new THREE.Mesh(geometry, item.material)
-    const height = settings.height * unit
+    const height = (settings.kind === 'sphere' ? settings.radius * 2 : settings.height) * unit
     mesh.position.y = height / 2
     mesh.castShadow = true
     mesh.receiveShadow = true
@@ -1047,10 +964,10 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     const runtime = runtimeRef.current
     if (!runtime) return null
     if (recordHistory) pushSceneHistory()
-    const settings = { ...sourceSettings }
+    const settings = normalizePrimitiveSettings(sourceSettings)
     const root = new THREE.Group()
     const id = crypto.randomUUID()
-    const name = settings.kind === 'cylinder' ? '参数化圆柱体' : '参数化方形体'
+    const name = `${primitiveLabels[settings.kind]}模型`
     root.name = name
     root.userData.sceneItemId = id
     root.position.copy(nextPlacement(sceneItemsRef.current.length))
@@ -1077,146 +994,15 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
   function changeParametricPrimitiveSettings(changes: Partial<ParametricPrimitiveSettings>, recordHistory = true) {
     if (!selectedItem?.parametricPrimitive) return
     if (recordHistory) pushSceneHistory()
-    const next = { ...selectedItem.parametricPrimitive.settings, ...changes }
-    next.radius = Math.max(10, Math.min(300, next.radius))
-    next.height = Math.max(10, Math.min(600, next.height))
-    next.length = Math.max(10, Math.min(600, next.length))
-    next.width = Math.max(10, Math.min(600, next.width))
+    const next = normalizePrimitiveSettings({ ...selectedItem.parametricPrimitive.settings, ...changes })
     selectedItem.parametricPrimitive.settings = next
     rebuildParametricPrimitive(selectedItem)
     syncSceneItems()
     updateSceneBounds(false)
   }
 
-  function rebuildParametricBox(item: SceneItem) {
-    const data = item.parametricBox
-    if (!data) return
-    const root = item.object as THREE.Group
-    const baseGroup = root.getObjectByName('parametric-box-base') as THREE.Group | undefined
-    const lidGroup = root.getObjectByName('parametric-box-lid') as THREE.Group | undefined
-    if (!baseGroup || !lidGroup) return
-
-    disposeObjectGeometries(baseGroup)
-    disposeObjectGeometries(lidGroup)
-    baseGroup.clear()
-    lidGroup.clear()
-
-    const settings = data.settings
-    const unit = 0.01
-    const length = settings.length * unit
-    const width = settings.width * unit
-    const baseHeight = settings.baseHeight * unit
-    const lidHeight = settings.lidHeight * unit
-    const thickness = Math.min(settings.thickness * unit, length * 0.2, width * 0.2, baseHeight * 0.45, lidHeight * 0.45)
-    const gap = settings.gap * unit
-    const lidLength = length + (gap + thickness) * 2
-    const lidWidth = width + (gap + thickness) * 2
-
-    data.baseMaterial.color.set(settings.baseColor)
-    data.lidMaterial.color.set(settings.lidColor)
-    buildOpenBoxGeometry(baseGroup, { length, width, height: baseHeight, thickness }, data.baseMaterial)
-    buildOpenBoxGeometry(lidGroup, { length: lidLength, width: lidWidth, height: lidHeight, thickness, inverted: true }, data.lidMaterial)
-
-    baseGroup.position.set(0, 0, 0)
-    baseGroup.rotation.set(0, 0, 0)
-    lidGroup.position.set(0, 0, 0)
-    lidGroup.rotation.set(0, 0, 0)
-    if (settings.pose === 'closed') {
-      lidGroup.position.y = baseHeight - lidHeight * 0.68
-    } else if (settings.pose === 'open') {
-      lidGroup.position.set(0, baseHeight + 0.45, 0)
-      lidGroup.rotation.z = THREE.MathUtils.degToRad(-8)
-    } else {
-      lidGroup.position.set((length + lidLength) / 2 + 0.45, 0, 0)
-      lidGroup.rotation.set(0, 0, 0)
-    }
-    root.updateMatrixWorld(true)
-    item.stats = collectModelStats(root)
-  }
-
-  function createParametricBox(
-    sourceSettings: ParametricBoxSettings = defaultParametricBoxSettings,
-    recordHistory = true,
-  ) {
-    const runtime = runtimeRef.current
-    if (!runtime) return null
-    if (recordHistory) pushSceneHistory()
-    const settings = { ...sourceSettings }
-    const root = new THREE.Group()
-    const baseGroup = new THREE.Group()
-    const lidGroup = new THREE.Group()
-    baseGroup.name = 'parametric-box-base'
-    lidGroup.name = 'parametric-box-lid'
-    root.add(baseGroup, lidGroup)
-    root.position.copy(nextPlacement(sceneItemsRef.current.length))
-    const id = crypto.randomUUID()
-    root.name = '参数化礼盒'
-    root.userData.sceneItemId = id
-    const baseMaterial = createModelMaterial(settings.baseColor)
-    const lidMaterial = createModelMaterial(settings.lidColor)
-    const item: SceneItem = {
-      id,
-      name: '参数化礼盒',
-      format: '参数模型',
-      object: root,
-      material: baseMaterial,
-      stats: { meshes: 0, vertices: 0, triangles: 0 },
-      parametricBox: { settings, baseMaterial, lidMaterial },
-    }
-    rebuildParametricBox(item)
-    runtime.scene.add(root)
-    allSceneItemsRef.current.add(item)
-    sceneItemsRef.current = [...sceneItemsRef.current, item]
-    syncSceneItems()
-    selectSceneItem(id)
-    window.requestAnimationFrame(() => updateSceneBounds(true))
-    return item
-  }
-
-  function createSavedParametricPart(saved: SavedModel3DItem) {
-    const runtime = runtimeRef.current
-    if (!runtime || !saved.part || !saved.settings) return null
-    const settings = { ...saved.settings }
-    const unit = 0.01
-    const length = settings.length * unit
-    const width = settings.width * unit
-    const baseHeight = settings.baseHeight * unit
-    const lidHeight = settings.lidHeight * unit
-    const thickness = Math.min(settings.thickness * unit, length * 0.2, width * 0.2, baseHeight * 0.45, lidHeight * 0.45)
-    const gap = settings.gap * unit
-    const material = createModelMaterial(saved.part === 'base' ? settings.baseColor : settings.lidColor)
-    const object = new THREE.Group()
-    if (saved.part === 'base') {
-      buildOpenBoxGeometry(object, { length, width, height: baseHeight, thickness }, material)
-    } else {
-      buildOpenBoxGeometry(object, {
-        length: length + (gap + thickness) * 2,
-        width: width + (gap + thickness) * 2,
-        height: lidHeight,
-        thickness,
-        inverted: true,
-      }, material)
-    }
-    const id = crypto.randomUUID()
-    object.name = saved.name
-    object.userData.sceneItemId = id
-    applySavedTransform(object, saved.transform)
-    const item: SceneItem = {
-      id,
-      name: saved.name,
-      format: saved.part === 'base' ? '参数模型 · 盒底' : '参数模型 · 盒盖',
-      object,
-      material,
-      stats: collectModelStats(object),
-      parametricBoxPart: { part: saved.part, settings },
-    }
-    runtime.scene.add(object)
-    allSceneItemsRef.current.add(item)
-    sceneItemsRef.current = [...sceneItemsRef.current, item]
-    return item
-  }
-
   async function restoreSavedScene(saved: SavedModel3DScene) {
+    saved = cleanModel3DScene(saved)
     const sequence = loadSequenceRef.current
     setViewportId(viewportPresets.some((preset) => preset.id === saved.viewportId) ? saved.viewportId : 'square')
     // Replace the former factory blue background, while preserving custom colors.
@@ -1232,18 +1018,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     const restored: SceneItem[] = []
     for (const savedItem of saved.items) {
       if (sequence !== loadSequenceRef.current) return
-      if (savedItem.kind === 'parametric-box' && savedItem.settings) {
-        const item = createParametricBox(savedItem.settings, false)
-        if (item) {
-          item.name = savedItem.name
-          item.object.name = savedItem.name
-          applySavedTransform(item.object, savedItem.transform)
-          restored.push(item)
-        }
-      } else if (savedItem.kind === 'parametric-part') {
-        const item = createSavedParametricPart(savedItem)
-        if (item) restored.push(item)
-      } else if (savedItem.kind === 'parametric-primitive' && savedItem.primitiveSettings) {
+      if (savedItem.kind === 'parametric-primitive' && savedItem.primitiveSettings) {
         const item = createParametricPrimitive(savedItem.primitiveSettings, false)
         if (item) {
           item.name = savedItem.name
@@ -1296,86 +1071,6 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
     })
   }
   restoreSavedSceneRef.current = restoreSavedScene
-
-  function changeParametricBoxSettings(changes: Partial<ParametricBoxSettings>, recordHistory = true) {
-    if (!selectedItem?.parametricBox) return
-    if (recordHistory) pushSceneHistory()
-    const current = selectedItem.parametricBox.settings
-    const next = { ...current, ...changes }
-    next.length = Math.max(50, Math.min(600, next.length))
-    next.width = Math.max(50, Math.min(600, next.width))
-    next.baseHeight = Math.max(20, Math.min(300, next.baseHeight))
-    next.lidHeight = Math.max(10, Math.min(150, next.lidHeight))
-    next.thickness = Math.max(1, Math.min(20, next.thickness))
-    next.gap = Math.max(1, Math.min(30, next.gap))
-    selectedItem.parametricBox.settings = next
-    rebuildParametricBox(selectedItem)
-    syncSceneItems()
-    updateSceneBounds(false)
-  }
-
-  function splitParametricBox() {
-    const runtime = runtimeRef.current
-    const item = selectedItem
-    const data = item?.parametricBox
-    if (!runtime || !item || !data) return
-    const baseSource = item.object.getObjectByName('parametric-box-base') as THREE.Group | undefined
-    const lidSource = item.object.getObjectByName('parametric-box-lid') as THREE.Group | undefined
-    if (!baseSource || !lidSource) return
-
-    pushSceneHistory()
-    item.object.updateMatrixWorld(true)
-
-    const createPart = (source: THREE.Group, name: string, color: string, format: string) => {
-      source.updateWorldMatrix(true, true)
-      const object = source.clone(true)
-      const material = createModelMaterial(color)
-      object.traverse((child) => {
-        const mesh = child as THREE.Mesh
-        if (!mesh.isMesh) return
-        mesh.geometry = mesh.geometry.clone()
-        mesh.material = material
-        mesh.castShadow = true
-        mesh.receiveShadow = true
-      })
-      object.matrix.copy(source.matrixWorld)
-      object.matrix.decompose(object.position, object.quaternion, object.scale)
-      object.matrixAutoUpdate = true
-      const id = crypto.randomUUID()
-      object.name = name
-      object.userData.sceneItemId = id
-      object.updateMatrixWorld(true)
-      const part: SceneItem = {
-        id,
-        name,
-        format,
-        object,
-        material,
-        stats: collectModelStats(object),
-        parametricBoxPart: {
-          part: name.includes('盒盖') ? 'lid' : 'base',
-          settings: { ...data.settings },
-        },
-      }
-      allSceneItemsRef.current.add(part)
-      return part
-    }
-
-    const basePart = createPart(baseSource, '参数礼盒 · 盒底', data.settings.baseColor, '参数模型 · 盒底')
-    const lidPart = createPart(lidSource, '参数礼盒 · 盒盖', data.settings.lidColor, '参数模型 · 盒盖')
-    const sourceIndex = sceneItemsRef.current.indexOf(item)
-    const nextItems = sceneItemsRef.current.filter((candidate) => candidate !== item)
-    nextItems.splice(Math.max(0, sourceIndex), 0, basePart, lidPart)
-
-    runtime.transformControls.detach()
-    runtime.selectionBox.visible = false
-    runtime.scene.remove(item.object)
-    runtime.scene.add(basePart.object, lidPart.object)
-    sceneItemsRef.current = nextItems
-    syncSceneItems()
-    selectSceneItem(basePart.id)
-    updateSceneBounds(false)
-  }
 
   function beginParameterEdit() {
     if (!parameterEditSnapshotRef.current) parameterEditSnapshotRef.current = captureSceneSnapshot()
@@ -1585,16 +1280,6 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
   function duplicateSelectedItem() {
     if (!selectedItem) return
     pushSceneHistory()
-    if (selectedItem.parametricBox) {
-      const copy = createParametricBox(selectedItem.parametricBox.settings, false)
-      if (!copy) return
-      copy.object.position.copy(selectedItem.object.position).add(new THREE.Vector3(0.45, 0, 0.45))
-      copy.object.quaternion.copy(selectedItem.object.quaternion)
-      copy.object.scale.copy(selectedItem.object.scale)
-      syncSceneItems()
-      updateSceneBounds(false)
-      return
-    }
     if (selectedItem.parametricPrimitive) {
       const copy = createParametricPrimitive(selectedItem.parametricPrimitive.settings, false)
       if (!copy) return
@@ -1629,20 +1314,12 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
   function changeSelectedColor(color: string) {
     setModelColor(color)
     if (!selectedItem) return
-    if (selectedItem.parametricBox) {
-      changeParametricBoxSettings({ baseColor: color })
-      return
-    }
     if (selectedItem.parametricPrimitive) {
       changeParametricPrimitiveSettings({ color })
       return
     }
     if (`#${selectedItem.material.color.getHexString()}`.toLowerCase() !== color.toLowerCase()) pushSceneHistory()
     selectedItem.material.color.set(color)
-    if (selectedItem.parametricBoxPart) {
-      if (selectedItem.parametricBoxPart.part === 'base') selectedItem.parametricBoxPart.settings.baseColor = color
-      else selectedItem.parametricBoxPart.settings.lidColor = color
-    }
     selectedItem.material.needsUpdate = true
   }
 
@@ -1742,7 +1419,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
       if (!savedScene) throw new Error('无法保存当前 3D 场景')
       await onExport({
         dataUrl,
-        fileName: `礼盒3D构图-${viewport.width}x${viewport.height}.png`,
+        fileName: `3D构图-${viewport.width}x${viewport.height}.png`,
         width: viewport.width,
         height: viewport.height,
         sceneId: sceneId || crypto.randomUUID(),
@@ -1802,7 +1479,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
             <Box size={19} />
             <div>
               <h2>3D 模型预览</h2>
-              <p>{transparentExport ? '调整模型的位置、角度与颜色，确认后应用到手绘画板' : '创建参数化礼盒或导入本地模型，调整位置与构图后输出为画板参考图'}</p>
+              <p>{transparentExport ? '调整模型的位置、角度与颜色，确认后应用到手绘画板' : '创建基础模型或导入本地模型，调整位置与构图后输出为画板参考图'}</p>
             </div>
           </div>
           <div className="model3d-head-actions">
@@ -1846,7 +1523,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
               )}
             </div>
 
-            <section className="model3d-library" aria-label="礼盒模型库">
+            <section className="model3d-library" aria-label="基础模型库">
               <div className="model3d-library-head">
                 <div>
                   <strong>参数模型</strong>
@@ -1854,19 +1531,19 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
                 </div>
               </div>
               <div className="model3d-parametric-create-list">
-                <button className="model3d-parametric-create" type="button" onClick={() => createParametricBox()}>
-                  <span className="model3d-model-glyph parametric">
-                    <Box size={22} />
+                <button className="model3d-parametric-create" type="button" onClick={() => createParametricPrimitive(primitiveDefaults.sphere)}>
+                  <span className="model3d-model-glyph sphere">
+                    <Circle size={22} />
                   </span>
-                  <span><strong>参数化礼盒</strong><small>调整尺寸、壁厚与盒盖状态</small></span>
+                  <span><strong>球体模型</strong><small>调整半径和表面分段</small></span>
                   <Plus size={14} />
                 </button>
-                <button className="model3d-parametric-create" type="button" onClick={() => createParametricPrimitive(defaultCylinderSettings)}>
+                <button className="model3d-parametric-create" type="button" onClick={() => createParametricPrimitive(primitiveDefaults.cylinder)}>
                   <span className="model3d-model-glyph cylinder" aria-hidden="true" />
                   <span><strong>圆柱模型</strong><small>调整半径和高度</small></span>
                   <Plus size={14} />
                 </button>
-                <button className="model3d-parametric-create" type="button" onClick={() => createParametricPrimitive(defaultCuboidSettings)}>
+                <button className="model3d-parametric-create" type="button" onClick={() => createParametricPrimitive(primitiveDefaults.cuboid)}>
                   <span className="model3d-model-glyph cuboid">
                     <Box size={21} />
                   </span>
@@ -2039,81 +1716,14 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
                 </div>
               )}
 
-              {selectedItem?.parametricBox && (
-                <div className="model3d-parametric-panel">
-                  <div className="model3d-parametric-head">
-                    <span><Box size={13} /> 礼盒参数</span>
-                    <small>单位 mm</small>
-                  </div>
-                  <div className="model3d-parametric-grid">
-                    {([
-                      ['length', '长度', 50, 600, 5],
-                      ['width', '宽度', 50, 600, 5],
-                      ['baseHeight', '盒底高度', 20, 300, 5],
-                      ['lidHeight', '盒盖高度', 10, 150, 5],
-                      ['thickness', '材料厚度', 1, 20, 1],
-                      ['gap', '盒盖间隙', 1, 30, 1],
-                    ] as const).map(([key, label, min, max, step]) => (
-                      <label key={key}>
-                        <span>{label}</span>
-                        <input
-                          type="number"
-                          min={min}
-                          max={max}
-                          step={step}
-                          value={selectedItem.parametricBox!.settings[key]}
-                          onFocus={beginParameterEdit}
-                          onBlur={endParameterEdit}
-                          onChange={(event) => changeParametricBoxSettings({ [key]: Number(event.target.value) }, false)}
-                        />
-                      </label>
-                    ))}
-                  </div>
-                  <div className="model3d-pose-options" role="group" aria-label="盒盖状态">
-                    {([
-                      ['closed', '盖合'],
-                      ['open', '打开'],
-                      ['separated', '分离'],
-                    ] as const).map(([pose, label]) => (
-                      <button
-                        className={selectedItem.parametricBox!.settings.pose === pose ? 'active' : ''}
-                        type="button"
-                        onClick={() => changeParametricBoxSettings({ pose })}
-                        key={pose}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="model3d-parametric-colors">
-                    <label>
-                      <span>盒底颜色</span>
-                      <input type="color" value={selectedItem.parametricBox.settings.baseColor} onChange={(event) => changeParametricBoxSettings({ baseColor: event.target.value })} />
-                    </label>
-                    <label>
-                      <span>盒盖颜色</span>
-                      <input type="color" value={selectedItem.parametricBox.settings.lidColor} onChange={(event) => changeParametricBoxSettings({ lidColor: event.target.value })} />
-                    </label>
-                  </div>
-                  <button className="model3d-parametric-split" type="button" onClick={splitParametricBox}>
-                    <Layers3 size={13} />
-                    拆分盒底与盒盖
-                  </button>
-                  <small className="model3d-parametric-note">拆分后可分别移动、旋转和改色；Ctrl+Z 可恢复参数礼盒。</small>
-                </div>
-              )}
-
               {selectedItem?.parametricPrimitive && (
                 <div className="model3d-parametric-panel">
                   <div className="model3d-parametric-head">
-                    <span><Box size={13} /> {selectedItem.parametricPrimitive.settings.kind === 'cylinder' ? '圆柱参数' : '方形参数'}</span>
-                    <small>单位 mm</small>
+                    <span><Box size={13} /> {primitiveLabels[selectedItem.parametricPrimitive.settings.kind]}参数</span>
+                    <small>{selectedItem.parametricPrimitive.settings.kind === 'sphere' ? '半径 mm · 分段数' : '单位 mm'}</small>
                   </div>
                   <div className="model3d-parametric-grid">
-                    {(selectedItem.parametricPrimitive.settings.kind === 'cylinder'
-                      ? ([['radius', '半径', 10, 300, 5], ['height', '高度', 10, 600, 5]] as const)
-                      : ([['length', '长度', 10, 600, 5], ['width', '宽度', 10, 600, 5], ['height', '高度', 10, 600, 5]] as const)
-                    ).map(([key, label, min, max, step]) => (
+                    {primitiveParameters[selectedItem.parametricPrimitive.settings.kind].map(([key, label, min, max, step]) => (
                       <label key={key}>
                         <span>{label}</span>
                         <input
@@ -2129,7 +1739,7 @@ export default function Model3DStudio({ onClose, onExport, initialScene = null, 
                       </label>
                     ))}
                   </div>
-                  <div className="model3d-parametric-colors single">
+                  <div className="model3d-parametric-colors">
                     <label>
                       <span>模型颜色</span>
                       <input type="color" value={selectedItem.parametricPrimitive.settings.color} onChange={(event) => changeParametricPrimitiveSettings({ color: event.target.value })} />

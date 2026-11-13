@@ -2,6 +2,7 @@ import { defineConfig, type Plugin, type ViteDevServer } from 'vite'
 import react from '@vitejs/plugin-react'
 import { model3DAssetsPlugin } from './server/model3dPlugin.ts'
 import { layerSplitPlugin } from './server/layerSplitPlugin.ts'
+import { upscalePlugin } from './server/upscalePlugin.ts'
 import { ZipArchive, type ArchiverError } from 'archiver'
 import { Open as ZipOpen } from 'unzipper'
 import { execFileSync, spawn } from 'node:child_process'
@@ -1567,13 +1568,28 @@ const apiMartModelConfigs: Record<
     defaultQuality: 'medium',
   },
   // Request configuration: https://apimart.ai/zh/model/gpt-image-2-6
-  'gpt-image-2.6': {
-    label: 'GPT Image 2.6',
+  'gpt-image-2.6-sunburst': {
+    label: 'GPT Image 2.6 Sunburst',
     resolutions: ['1K', '2K', '4K'],
     defaultResolution: '1K',
     maxReferenceImages: 16,
     requiresPublicReferenceUrls: true,
     defaultQuality: 'auto',
+  },
+  'gpt-image-2.6-flare': {
+    label: 'GPT Image 2.6 Flare',
+    resolutions: ['1K', '2K', '4K'],
+    defaultResolution: '1K',
+    maxReferenceImages: 16,
+    requiresPublicReferenceUrls: true,
+    defaultQuality: 'auto',
+  },
+  // https://docs.apimart.ai/cn/api-reference/images/seedream-5-5/generation
+  'seedream-5-5': {
+    label: 'Seedream 5.5',
+    resolutions: ['1K', '1.5K', '2K'],
+    defaultResolution: '2K',
+    maxReferenceImages: 10,
   },
   'seedream-5-0-pro': {
     label: 'Seedream 5.0 Pro',
@@ -1819,6 +1835,8 @@ function apiMartResolution(model: string, requested?: ImageResolutionTier) {
 
 async function requestApiMartImage(config: ApiConfig, prompt: string, referenceImageUrls: string[]) {
   if (!config.apiKey?.trim()) throw new UpstreamHttpError('请先填写 API Mart API Key。', 400)
+  // Accept older clients/projects without sending the retired family ID upstream.
+  if (config.model === 'gpt-image-2.6') config = { ...config, model: 'gpt-image-2.6-flare' }
   const modelConfig = apiMartModelConfigs[config.model]
   if (!modelConfig) throw new UpstreamHttpError('当前 API Mart 模型不在网站内置的可选列表中。', 400)
 
@@ -2744,7 +2762,9 @@ function localImageLibraryPlugin(): Plugin {
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), model3DAssetsPlugin(), localImageLibraryPlugin(), layerSplitPlugin({ readBody, sendJson, fetchUpstream, loadImageBuffer, consumeGenerationQuota })],
+  plugins: [react(), model3DAssetsPlugin(), localImageLibraryPlugin(), layerSplitPlugin({ readBody, sendJson, fetchUpstream, loadImageBuffer, consumeGenerationQuota }), upscalePlugin({ readBody, sendJson, fetchUpstream, consumeGenerationQuota })],
+  resolve: { dedupe: ['react', 'react-dom'] },
+  optimizeDeps: { include: ['react', 'react-dom', 'react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime'] },
   server: {
     watch: {
       ignored: [

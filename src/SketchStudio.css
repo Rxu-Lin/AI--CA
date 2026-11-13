@@ -10,25 +10,25 @@
 .sketch-head span { color: #989898; font-size: 11px; }
 .sketch-head > button { background: transparent; border-color: transparent; }
 .sketch-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 302px; }
-.sketch-workspace { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: #eaeaea; position: relative; }
-.sketch-toolbar { display: flex; align-items: center; justify-content: center; gap: 4px; flex-shrink: 0; align-self: center; margin: 16px 10px 0; padding: 6px 10px; background: #ffffff; border: 1px solid #e0e0e0; border-radius: 36px; box-shadow: 0 2px 5px #00000012; z-index: 2; }
-.sketch-toolbar button { background: transparent; border: 0; border-radius: 50%; width: 39px; height: 39px; color: #1a1a1a; padding: 8px; }
-.sketch-toolbar button.active, .sketch-toolbar button:hover:not(:disabled) { background: #f0f0f0; color: #000000; }
-.sketch-divider { width: 1px; height: 23px; background: #e3e3e3; margin: 0 5px; }
+.sketch-workspace { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: #161616; position: relative; }
+.sketch-toolbar { display: flex; align-items: center; justify-content: center; gap: 4px; flex-shrink: 0; align-self: center; margin: 16px 10px 0; padding: 6px 10px; background: #242424; border: 1px solid #3d3d3d; border-radius: 36px; box-shadow: 0 2px 8px #00000040; z-index: 2; }
+.sketch-toolbar button { background: transparent; border: 0; border-radius: 50%; width: 39px; height: 39px; color: #cecece; padding: 8px; }
+.sketch-toolbar button.active, .sketch-toolbar button:hover:not(:disabled) { background: #3b3b3b; color: #ffffff; }
+.sketch-divider { width: 1px; height: 23px; background: #454545; margin: 0 5px; }
 .sketch-stage { flex: 1; min-height: 0; position: relative; overflow: hidden; touch-action: none; overscroll-behavior: contain; }
 .sketch-paper { position: absolute; left: 50%; top: 50%; transform-origin: center; box-shadow: 0 6px 35px #2828281c; }
 .sketch-paper canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 .sketch-brush-cursor { position: absolute; z-index: 4; box-sizing: border-box; border: 1px solid rgba(255, 255, 255,.96); border-radius: 50%; pointer-events: none; transform: translate(-50%, -50%); box-shadow: 0 0 0 1px rgba(0, 0, 0,.78), 0 1px 4px rgba(0, 0, 0,.3); }
 .sketch-brush-cursor[hidden] { display: none; }
-.sketch-stage-label { position: absolute; left: 16px; bottom: 10px; background: #eaeaead9; border-radius: 4px; padding: 4px 6px; color: #606060; font-size: 11px; pointer-events: none; }
-.sketch-zoom { position: absolute; right: 16px; bottom: 9px; display: flex; gap: 2px; padding: 3px; border-radius: 8px; background: #ffffff; border: 1px solid #dbdbdb; }
-.sketch-zoom button { background: transparent; color: #505050; border: 0; min-height: 27px; padding: 4px 7px; }
-.sketch-zoom button:hover:not(:disabled) { background: #f0f0f0; }
-.sketch-palette { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px; background: #f8f8f8; padding: 14px; border-top: 1px solid #dfdfdf; }
-.sketch-palette button { border-radius: 50%; border: 1px solid #00000020; min-height: 28px; width: 28px; height: 28px; padding: 0; position: relative; }
+.sketch-stage-label { position: absolute; left: 16px; bottom: 10px; background: #111111c9; border-radius: 4px; padding: 4px 6px; color: #a3a3a3; font-size: 11px; pointer-events: none; }
+.sketch-zoom { position: absolute; right: 16px; bottom: 9px; display: flex; gap: 2px; padding: 3px; border-radius: 8px; background: #242424; border: 1px solid #3d3d3d; }
+.sketch-zoom button { background: transparent; color: #cecece; border: 0; min-height: 27px; padding: 4px 7px; }
+.sketch-zoom button:hover:not(:disabled) { background: #3b3b3b; }
+.sketch-palette { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px; background: #1b1b1b; padding: 14px; border-top: 1px solid #333333; }
+.sketch-palette button { border-radius: 50%; border: 1px solid #ffffff30; min-height: 28px; width: 28px; height: 28px; padding: 0; position: relative; }
 .sketch-palette button:hover:not(:disabled) { border-color: #8a8a8a; }
-.sketch-palette button.active { outline: 2px solid #676767; outline-offset: 3px; }
-.sketch-palette input[type=color] { width: 32px; height: 32px; border: 0; padding: 0; border-radius: 7px; cursor: pointer; background: transparent; }
+.sketch-palette button.active { outline: 2px solid #dedede; outline-offset: 3px; }
+.sketch-palette input[type=color] { width: 32px; height: 32px; border: 1px solid #ffffff30; padding: 2px; border-radius: 7px; cursor: pointer; background: transparent; }
 .sketch-inspector { overflow-y: auto; min-height: 0; border-left: 1px solid #333333; scrollbar-width: thin; scrollbar-color: #484848 #171717; }
 .sketch-inspector section { padding: 16px; border-bottom: 1px solid #323232; display: grid; gap: 12px; }
 .sketch-section-title { display: flex; align-items: center; gap: 7px; }

@@ -37,8 +37,8 @@ function requestId(value: unknown) {
   return value
 }
 function providerKey(value: unknown) {
-  const key = (typeof value === 'string' ? value : process.env.FAL_KEY || '').trim()
-  if (!key) throw new LayerSplitError('请先填写 fal API Key，或在服务器设置 FAL_KEY。API Mart 密钥不适用于图层拆分。', 401)
+  const key = (typeof value === 'string' ? value : process.env.FAL_KEY || '').trim().replace(/^(?:Authorization\s*:\s*)?Key\s+/i, '').trim()
+  if (!key) throw new LayerSplitError('请先在顶部 API 设置 → fal 专项服务填写 fal API Key，或在服务器设置 FAL_KEY。', 401)
   if (key.length > 512 || /[\r\n]/.test(key)) throw new LayerSplitError('fal API Key 格式不正确。')
   return key
 }
@@ -90,6 +90,8 @@ export function createLayerSplitService(deps: Dependencies) {
       redirect: 'error', signal: AbortSignal.timeout(60_000),
     })
     const data = await response.json().catch(() => ({})) as Json
+    if (response.status === 401) throw new LayerSplitError('fal 身份验证失败，请在顶部 API 设置 → fal 专项服务更新密钥。', 401)
+    if (response.status === 403) throw new LayerSplitError('fal 拒绝访问，请在顶部 API 设置 → fal 专项服务检查密钥权限和账户状态。', 403)
     if (!response.ok) throw new LayerSplitError(safeError(data.detail || data.error, key), response.status)
     if (data.error) throw new LayerSplitError(safeError(data.error, key), 502)
     return record(data)

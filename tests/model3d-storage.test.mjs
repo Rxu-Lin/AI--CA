@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import ts from 'typescript'
-import { IDBFactory, IDBObjectStore } from 'fake-indexeddb'
+import { IDBFactory, IDBObjectStore, IDBCursor } from 'fake-indexeddb'
 
 const compile = (source) => ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
 const storeCode = compile(readFileSync(new URL('../src/model3dSceneStore.ts', import.meta.url), 'utf8'))
@@ -156,6 +156,7 @@ test('closing or resetting during asynchronous model restoration disposes the st
     loadSequenceRef: sequence, viewportPresets: [], defaultBackgroundColor: '#111820',
     defaultLightIntensity: 1, defaultLightAzimuth: -55, defaultLightElevation: 38,
     parseSavedModelSource: () => deferred,
+    cleanModel3DScene: storageHarness().store.cleanModel3DScene,
     addSceneObject() { assert.fail('Cancelled restore must not add a model') },
     disposeModel: (value) => disposed.push(value),
   }
@@ -166,4 +167,83 @@ test('closing or resetting during asynchronous model restoration disposes the st
   finish(object)
   await pending
   assert.deepEqual(disposed, [object])
+})
+
+const retiredItems = () => [
+  { kind: 'parametric-box', name: '旧参数模型', settings: { length: 320, baseColor: '#ffffff' }, transform: scene().items[0].transform },
+  { kind: 'parametric-part', name: '旧拆分零件', part: 'lid', settings: { lidHeight: 55 }, transform: scene().items[0].transform },
+]
+const sphereItem = () => ({ kind: 'parametric-primitive', name: '球体模型', primitiveSettings: { kind: 'sphere', radius: 150, height: 200, length: 200, width: 200, widthSegments: 48, heightSegments: 32, color: '#aabbcc' }, transform: scene().items[0].transform })
+async function rawScene(h, operation, key, value) {
+  const request = h.window.indexedDB.open('cpd-model3d-scenes', 1)
+  request.onupgradeneeded = () => request.result.createObjectStore('scenes')
+  const db = await new Promise((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error) })
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('scenes', operation === 'get' ? 'readonly' : 'readwrite')
+    const store = tx.objectStore('scenes')
+    const result = operation === 'get' ? store.get(key) : store.put(value, key)
+    tx.oncomplete = () => { db.close(); resolve(result.result) }
+    tx.onabort = () => { db.close(); reject(tx.error) }
+  })
+}
+
+test('retired procedural records are purged from every stored scene and legacy draft while other data and selection survive', async () => {
+  const h = storageHarness()
+  const mixed = { ...scene(), items: [retiredItems()[0], sphereItem(), retiredItems()[1], scene().items[0]], selectedIndex: 3 }
+  await rawScene(h, 'put', 'mixed-scene', mixed)
+  await rawScene(h, 'put', 'retired-only', { ...scene(), items: retiredItems(), selectedIndex: 0 })
+  await rawScene(h, 'put', 'unchanged-scene', scene())
+  h.data.set(legacyKey, JSON.stringify(mixed))
+  h.data.set('unrelated-setting', 'keep')
+  await h.store.removeRetiredModel3DData()
+  const cleaned = await rawScene(h, 'get', 'mixed-scene')
+  assert.deepEqual(plain(cleaned.items), [sphereItem(), scene().items[0]])
+  assert.equal(cleaned.selectedIndex, 1)
+  assert.deepEqual(plain(cleaned.camera), scene().camera)
+  assert.deepEqual(plain(await rawScene(h, 'get', 'unchanged-scene')), scene())
+  const empty = await rawScene(h, 'get', 'retired-only')
+  assert.equal(empty.items.length, 0); assert.equal(empty.selectedIndex, -1)
+  assert.equal(h.data.has(legacyKey), false)
+  assert.equal(h.data.get('unrelated-setting'), 'keep')
+  assert.deepEqual(plain((await h.reload().readModel3DDraft()).items), [sphereItem(), scene().items[0]])
+  await h.store.removeRetiredModel3DData()
+  assert.deepEqual(plain(await rawScene(h, 'get', 'mixed-scene')), plain(cleaned), 'cleanup is idempotent')
+})
+
+test('old imported project records cannot reintroduce retired models; sphere parameters persist without geometry blobs', async () => {
+  const h = storageHarness()
+  const mixed = { ...scene(), items: [...retiredItems(), sphereItem(), scene().items[0]], selectedIndex: 2 }
+  await h.store.saveModel3DScenes({ 'imported-project': mixed })
+  await h.store.saveModel3DDraft(mixed)
+  const restored = await h.reload().readModel3DScene('imported-project')
+  assert.deepEqual(plain(restored.items), [sphereItem(), scene().items[0]])
+  assert.equal(restored.selectedIndex, 0)
+  assert.equal(JSON.stringify(restored.items[0]).includes('geometry'), false)
+  assert.deepEqual(plain((await h.reload().readModel3DDraft()).items), plain(restored.items))
+})
+
+test('cleanup preserves the current draft when a stale legacy backup still contains retired objects', async () => {
+  const h = storageHarness()
+  const current = { ...scene(), items: [sphereItem(), scene().items[0]], focalLength: 85 }
+  await h.store.saveModel3DDraft(current)
+  h.data.set(legacyKey, JSON.stringify({ ...scene(), items: retiredItems(), focalLength: 18 }))
+  await h.store.removeRetiredModel3DData()
+  assert.deepEqual(plain(await h.reload().readModel3DDraft()), current)
+  assert.equal(h.data.has(legacyKey), false)
+})
+
+test('failed cleanup rolls back every scene and keeps the legacy backup readable', async t => {
+  const h = storageHarness()
+  const mixed = { ...scene(), items: [...retiredItems(), scene().items[0]], selectedIndex: 2 }
+  await rawScene(h, 'put', 'saved-project', mixed)
+  h.data.set(legacyKey, JSON.stringify(mixed))
+  const update = IDBCursor.prototype.update
+  t.mock.method(IDBCursor.prototype, 'update', function (...args) {
+    const request = update.apply(this, args)
+    request.addEventListener('success', () => this.source.transaction.abort())
+    return request
+  }, { times: 1 })
+  await assert.rejects(h.store.removeRetiredModel3DData())
+  assert.deepEqual(plain(await rawScene(h, 'get', 'saved-project')), mixed)
+  assert.equal(h.data.has(legacyKey), true)
 })

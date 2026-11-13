@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowDown, ArrowUp, Check, ChevronDown, Download, Eye, EyeOff, KeyRound, Layers, Loader2, Plus, RotateCcw, WandSparkles, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, ChevronDown, Download, Eye, EyeOff, Layers, Loader2, Plus, RotateCcw, WandSparkles, X } from 'lucide-react'
 import UnifiedRange from './UnifiedRange'
 import { exportLayerPngs, exportLayerPsd, loadLayerImage, moveRasterLayer, type LayerDocument, type LayerSplitJob, type RasterLayer } from './layerDocument'
-import { readLayerApiKey, saveLayerApiKey } from './layerSplitClient'
+import { falConfigReady } from './falConfig'
+import { useFalConfig } from './useFalConfig'
+import FalServiceStatus from './FalServiceStatus'
 import FineLayerEditor from './FineLayerEditor'
 import { emptyFineDraft, undoLayerFill, type FineLayerDraft } from './fineLayerDocument'
 import './LayerSplitStudio.css'
@@ -24,6 +26,7 @@ type Props = {
   onSave: (doc: LayerDocument) => Promise<void>
   onExtract: (layer: RasterLayer, doc: LayerDocument) => Promise<void>
   onClose: () => void
+  onOpenApiSettings: () => void
 }
 
 export default function LayerSplitStudio(props: Props) {
@@ -36,9 +39,7 @@ export default function LayerSplitStudio(props: Props) {
   const [selectedId, setSelectedId] = useState(props.document?.layers.at(-1)?.id || '')
   const [numLayers, setNumLayers] = useState(props.job?.numLayers || 4)
   const [caption, setCaption] = useState(props.job?.caption || '')
-  const [apiKey, setApiKey] = useState(readLayerApiKey)
-  const [serverConfigured, setServerConfigured] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(!readLayerApiKey())
+  const fal = useFalConfig()
   const [splitSettingsOpen, setSplitSettingsOpen] = useState(!props.document)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
@@ -52,13 +53,10 @@ export default function LayerSplitStudio(props: Props) {
   const closingRef = useRef(false)
   const busy = props.running || Boolean(action)
   const selected = doc?.layers.find(layer => layer.id === selectedId)
-  const ready = Boolean(apiKey.trim() || serverConfigured)
+  const ready = falConfigReady(fal)
 
   useEffect(() => {
     let cancelled = false
-    void fetch('/api/layers/config').then(response => response.json()).then(data => {
-      if (!cancelled) setServerConfigured(Boolean(data.configured))
-    }).catch(() => {})
     void loadLayerImage(props.sourceImageUrl).then(image => {
       if (!cancelled) setSourceSize({ width: image.naturalWidth, height: image.naturalHeight })
     }).catch(reason => { if (!cancelled) setSourceError(reason.message) })
@@ -119,19 +117,10 @@ export default function LayerSplitStudio(props: Props) {
       updateFineDraft(undefined); setView('layers')
     }
   }
-  const credentials = <details className="fine-layer-credentials" open={settingsOpen} onToggle={event => setSettingsOpen(event.currentTarget.open)}>
-    <summary><KeyRound size={13} />fal 接口配置{ready && <Check size={12} />}</summary>
-    <div className="layer-split-credentials">
-      <label>fal API Key<input type="password" autoComplete="off" placeholder={serverConfigured ? '服务器已配置，可留空' : '输入 fal API Key'} value={apiKey} onChange={event => setApiKey(event.target.value)} disabled={fineWorking} /></label>
-      <button type="button" disabled={fineWorking} onClick={() => { saveLayerApiKey(apiKey); setSettingsOpen(false); setNotice('配置已保存到当前浏览器会话。') }}>保存配置</button>
-      <p>SAM 3 和 GPT 共用 fal 密钥，按实际调用计费。密钥不写入项目。</p>
-      <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noreferrer">获取 fal 密钥 ↗</a>
-    </div>
-  </details>
+  const serviceStatus = <FalServiceStatus onOpenSettings={props.onOpenApiSettings} />
   async function run() {
     await perform('提交', async () => {
-      if (!ready) throw new Error('请先配置 fal API Key。')
-      saveLayerApiKey(apiKey)
+      if (!ready) throw new Error('请先到顶部 API 设置 → fal 专项服务配置密钥。')
       if (doc && dirty) await props.onSave(doc)
       const source = await loadLayerImage(props.sourceImageUrl)
       if (source.naturalWidth * source.naturalHeight > 16_777_216) throw new Error('请使用不超过 1600 万像素的图片。')
@@ -165,9 +154,8 @@ export default function LayerSplitStudio(props: Props) {
         </nav>
         {view === 'fine' ? <FineLayerEditor
           key={fineDraft?.targetLayerId || 'source'}
-          sourceImageUrl={props.sourceImageUrl} document={doc} draft={fineDraft} credentials={credentials} ready={ready}
+          sourceImageUrl={props.sourceImageUrl} document={doc} draft={fineDraft} serviceStatus={serviceStatus} ready={ready}
           onDraft={updateFineDraft} onComplete={completeFine} onLockChange={setFineLocked} onWorkingChange={setFineWorking}
-          onPrepare={() => saveLayerApiKey(apiKey)}
         /> : <>
         <div className="layer-split-body">
           <div className="layer-split-workspace">
@@ -193,15 +181,10 @@ export default function LayerSplitStudio(props: Props) {
           </div>
           <aside className="layer-split-inspector">
             <section className="layer-split-settings">
-              <div className="layer-split-section-title"><button type="button" className="layer-split-settings-toggle" aria-expanded={splitSettingsOpen} onClick={() => setSplitSettingsOpen(!splitSettingsOpen)}><strong>拆分设置</strong><ChevronDown size={13} /></button><button type="button" onClick={() => { setSplitSettingsOpen(true); setSettingsOpen(!settingsOpen) }} aria-expanded={splitSettingsOpen && settingsOpen}><KeyRound size={13} />接口配置</button></div>
+              {serviceStatus}
+              <div className="layer-split-section-title"><button type="button" className="layer-split-settings-toggle" aria-expanded={splitSettingsOpen} onClick={() => setSplitSettingsOpen(!splitSettingsOpen)}><strong>拆分设置</strong><ChevronDown size={13} /></button></div>
               {splitSettingsOpen && <>
               <p className="layer-split-model">Qwen-Image-Layered <span>via fal</span></p>
-              {settingsOpen && <div className="layer-split-credentials">
-                <label>fal API Key<input type="password" autoComplete="off" placeholder={serverConfigured ? '服务器已配置，可留空' : '输入 fal API Key'} value={apiKey} onChange={event => setApiKey(event.target.value)} disabled={busy} /></label>
-                <button type="button" disabled={busy} onClick={() => { saveLayerApiKey(apiKey); setNotice(apiKey.trim() ? '密钥已保存到当前浏览器会话。' : '已清除会话密钥。') }}><Check size={13} />保存配置</button>
-                <p>使用独立的 fal 密钥，仅在当前浏览器会话保存，不写入画布项目。</p>
-                <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noreferrer">获取 fal 密钥 ↗</a>
-              </div>}
               <label className="layer-split-range-label">目标图层数<output>{numLayers}</output></label>
               <UnifiedRange aria-label="目标图层数" min={2} max={8} step={1} value={numLayers} disabled={busy} onValueChange={setNumLayers} />
               <label className="layer-split-description">画面描述 <span>可选</span><textarea placeholder="描述主体、背景及被遮挡内容，帮助模型理解画面" maxLength={2000} value={caption} disabled={busy} onChange={event => setCaption(event.target.value)} /></label>
@@ -241,7 +224,7 @@ export default function LayerSplitStudio(props: Props) {
               <button type="button" disabled={busy} onClick={() => void perform('导出 PNG', () => exportLayerPngs(doc, props.sourceName))}>PNG 图层</button>
               <button type="button" className="layer-split-export" disabled={busy} onClick={() => void perform('导出 PSD', () => exportLayerPsd(doc, props.sourceName))}><Download size={14} />导出 PSD</button>
             </>}
-            {props.job && !doc && !props.running ? <button type="button" disabled={Boolean(action) || !ready} onClick={() => { saveLayerApiKey(apiKey); setError(''); props.onResume() }}>继续获取结果</button> : <button className="layer-split-run" type="button" disabled={busy || !sourceSize || !ready || Boolean(sourceError)} title={doc ? '基于原图重新拆分，将创建新的结果节点' : '运行图层拆分'} aria-label={doc ? '重新拆分图层' : '运行图层拆分'} onClick={() => void run()}>{busy ? <Loader2 size={16} className="export-spinner" /> : 'Run'}</button>}
+            {props.job && !doc && !props.running ? <button type="button" disabled={Boolean(action) || !ready} onClick={() => { setError(''); props.onResume() }}>继续获取结果</button> : <button className="layer-split-run" type="button" disabled={busy || !sourceSize || !ready || Boolean(sourceError)} title={doc ? '基于原图重新拆分，将创建新的结果节点' : '运行图层拆分'} aria-label={doc ? '重新拆分图层' : '运行图层拆分'} onClick={() => void run()}>{busy ? <Loader2 size={16} className="export-spinner" /> : 'Run'}</button>}
           </div>
         </footer>
         </>}

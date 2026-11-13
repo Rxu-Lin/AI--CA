@@ -467,10 +467,6 @@
   color: #cbcbcb;
 }
 
-.model3d-model-glyph.parametric svg {
-  transform: rotate(-7deg);
-}
-
 .model3d-model-glyph.cylinder::before {
   width: 18px;
   height: 23px;
@@ -809,37 +805,10 @@
   border-color: rgba(180, 180, 180, 0.42);
 }
 
-.model3d-pose-options {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 5px;
-}
-
-.model3d-pose-options button {
-  height: 28px;
-  border: 1px solid rgba(182, 182, 182, 0.14);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.025);
-  color: #969696;
-  cursor: pointer;
-  font-size: 9px;
-}
-
-.model3d-pose-options button:hover,
-.model3d-pose-options button.active {
-  border-color: rgba(180, 180, 180, 0.4);
-  background: rgba(180, 180, 180, 0.1);
-  color: #f0f0f0;
-}
-
 .model3d-parametric-colors {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
-
-.model3d-parametric-colors.single {
   grid-template-columns: 1fr;
+  gap: 6px;
 }
 
 .model3d-parametric-colors label {
@@ -857,34 +826,6 @@
   background: transparent;
   cursor: pointer;
   padding: 2px;
-}
-
-.model3d-parametric-split {
-  display: inline-flex;
-  width: 100%;
-  height: 31px;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border: 1px solid rgba(180, 180, 180, 0.3);
-  border-radius: 7px;
-  background: rgba(180, 180, 180, 0.08);
-  color: #ebebeb;
-  cursor: pointer;
-  font-size: 9px;
-  font-weight: 660;
-}
-
-.model3d-parametric-split:hover {
-  border-color: rgba(180, 180, 180, 0.52);
-  background: rgba(180, 180, 180, 0.14);
-}
-
-.model3d-parametric-note {
-  color: #707070;
-  font-size: 8px;
-  line-height: 1.45;
-  text-align: center;
 }
 
 .model3d-transform-group {

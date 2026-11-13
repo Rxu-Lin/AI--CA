@@ -11,13 +11,12 @@ type Props = {
   sourceImageUrl: string
   document?: LayerDocument
   draft?: FineLayerDraft
-  credentials: ReactNode
+  serviceStatus: ReactNode
   ready: boolean
   onDraft: (draft: FineLayerDraft) => void
   onComplete: (doc: LayerDocument) => Promise<void>
   onLockChange: (locked: boolean) => void
   onWorkingChange: (working: boolean) => void
-  onPrepare: () => void
 }
 const fillModels = [
   { value: 'gpt-image-2.5-flare', label: 'GPT Image 2.5 Flare' },
@@ -204,7 +203,6 @@ export default function FineLayerEditor(props: Props) {
   async function recognize() {
     if (!source || blocked || !props.ready) return
     await work('正在提交选区识别…', async signal => {
-      props.onPrepare()
       const imageUrl = await cacheLayerImage(source.url)
       const snapshot = draftRef.current
       const response = await layerRequest<{ requestId: string; model: 'sam3' }>('segment-submit', { imageUrl: source.url, prompt: snapshot.prompt, points: snapshot.points, box: snapshot.box })
@@ -225,7 +223,6 @@ export default function FineLayerEditor(props: Props) {
   async function submitFill() {
     if (!source || blocked || !props.ready) return
     await work('正在提交 GPT 补全…', async signal => {
-      props.onPrepare()
       const snapshot = draftRef.current
       const mask = repair ? await readMask(snapshot.maskUrl!, source.width, source.height) : await unionElementMasks(snapshot.elements, source.width, source.height)
       if (!mask.some(Boolean)) throw new Error('请先选择要补全的区域。')
@@ -279,7 +276,7 @@ export default function FineLayerEditor(props: Props) {
       <aside className="layer-split-inspector">
         <section>
           <div className="layer-split-section-title"><strong>{repair ? '单层补全' : '① 选择元素'}</strong><span>SAM 3</span></div>
-          {props.credentials}
+          {props.serviceStatus}
           <label className="layer-split-description">元素描述<textarea placeholder="例如：黑色气垫盒，包含盒盖与底座" maxLength={500} value={draft.prompt} disabled={blocked} onChange={event => change({ ...draft, prompt: event.target.value })} /></label>
           <button type="button" className="fine-layer-wide" disabled={blocked || !props.ready || !source || (!draft.prompt.trim() && !draft.points.some(p => p.label === 1) && !draft.box)} onClick={() => void recognize()}><WandSparkles size={14} />识别元素</button>
           <p className="layer-split-help">用包含 / 排除标记或框选引导识别，再用补选、减选修正边缘。手绘选区无需调用识别接口。</p>
@@ -305,7 +302,7 @@ export default function FineLayerEditor(props: Props) {
       <div>
         {draft.resultDocument ? <button type="button" disabled={working} onClick={() => void work('正在保存…', async () => { await props.onComplete(draft.resultDocument!) })}><Check size={14} />应用已生成结果</button> : draft.pending ? <>
           <button type="button" disabled={working} onClick={() => { change({ ...draftRef.current, pending: undefined }); setError(''); setNotice('已放弃获取此结果；上游任务可能仍会完成并计费。') }}>放弃本次结果</button>
-          <button type="button" disabled={working || !props.ready || !source} onClick={() => void work('正在查询原任务…', async signal => { props.onPrepare(); await finish(draft.pending!, signal) })}>继续获取结果</button>
+          <button type="button" disabled={working || !props.ready || !source} onClick={() => void work('正在查询原任务…', async signal => { await finish(draft.pending!, signal) })}>继续获取结果</button>
         </> : <>
           {!repair && <button type="button" disabled={blocked || !draft.elements.length || !source} onClick={() => void onlyExtract()}>仅提取到画布</button>}
           <button type="button" className="layer-split-run" aria-label={repair ? 'GPT 补全当前图层' : 'GPT 补全背景并分层'} title={repair ? '补全当前图层' : '补全背景并创建分层结果'} disabled={blocked || !source || !props.ready || (repair ? !draft.maskUrl : !draft.elements.length)} onClick={() => void submitFill()}>{working ? <Loader2 size={16} className="export-spinner" /> : 'Run'}</button>
