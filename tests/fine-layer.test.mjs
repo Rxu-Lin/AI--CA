@@ -179,7 +179,7 @@ test('precision result creates one connected node at source dimensions and clear
   const original = { id: 'source', position: { x: 10, y: 20 }, data: { kind: 'reference', imageUrl: '/original.png', fineLayerDraft: { version: 1 }, title: '原图' } }
   const context = appFunctions(['createFineLayerResult'], { nodes: [original], edges: [], layerSplitSession: { nodeId: 'source', sourceImageUrl: sourceUrl },
     cacheCanvasImage: async url => url === sourceUrl ? '/original-cache.png' : '/composite.png', renderLayerDocument: async () => ({ toDataURL: () => 'composite-data' }),
-    id: prefix => `${prefix}-${++index}`, getAbsoluteNodePosition: node => node.position, findFreeWorkflowNodePosition: point => point,
+    id: prefix => `${prefix}-${++index}`, findImageResultPosition: node => node.position,
     MarkerType: { ArrowClosed: 'arrow' }, workflowEdgeColor: '#aaa', imageInputHandlePrefix: 'image-', setSelectedNodeId() {}, markDirty() {}, setToast() {},
   })
   context.setNodes = update => { context.nodes = update(context.nodes) }; context.setEdges = update => { context.edges = update(context.edges) }; context.setLayerSplitSession = value => { context.layerSplitSession = value }

@@ -117,7 +117,7 @@ test('project export includes nested layer images, 3D sources and editable scene
 function generationHarness({ source, failure = false, cacheFailure = false } = {}) {
   let sequence = 0
   const requests = []
-  const context = functionsFrom('src/App.tsx', ['saveSketchToCanvas'], {
+  const context = functionsFrom('src/App.tsx', ['saveSketchToCanvas', 'generationCardWidth'], {
     nodes: source ? [source] : [], sketchSession: { nodeId: source?.id || null },
     apiConfig: { mode: 'mock', apiKey: '', model: 'mock', imageSize: '1K' },
     cacheCanvasImage: async image => { if (cacheFailure) throw Error('cache unavailable'); return image.startsWith('data:') ? '/cache/image.png' : image },

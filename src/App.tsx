@@ -39,11 +39,10 @@ import {
   ChevronDown,
   Copy,
   Download,
-  Eye,
   Expand,
+  Eye,
   FolderOpen,
   Group as GroupIcon,
-  History,
   Image as ImageIcon,
   KeyRound,
   Layers,
@@ -69,6 +68,9 @@ import brandLogo from './assets/brand-logo.png'
 import promptLibraryMarkdown from '../提示词.md?raw'
 import UnifiedRange from './UnifiedRange'
 import GenerationSelect from './GenerationSelect'
+import ResultMediaPreview, { type ResultMedia } from './ResultMediaPreview'
+import ResultVersionPicker from './ResultVersionPicker'
+import { includeCurrentResults, indexResultVersions, nodeResultVersions, versionCopyFields, versionMedia, type GenerationRecord, type NodeResultVersions, type VersionChoice } from './resultVersions'
 import './App.css'
 import './ControlTheme.css'
 import { generationPromptText, migrateLegacyPromptNodes, whiteModelAnimationPrompt } from './workflowPrompts'
@@ -234,23 +236,6 @@ type ApiMartVideoModelOption = {
   maxReferenceVideos: number
 }
 
-type GenerationRecord = {
-  id: string
-  prompt: string
-  model: string
-  size: string
-  createdAt: string
-  mediaType?: 'image' | 'video'
-  imageUrl?: string
-  videoUrl?: string
-  status: '成功' | '失败'
-}
-
-type HistoryMediaPreview = Pick<GenerationRecord, 'prompt' | 'createdAt'> & {
-  mediaType: 'image' | 'video'
-  mediaUrl: string
-}
-
 type ImageInputSlot = {
   id: string
   index: number
@@ -291,6 +276,12 @@ type WorkflowNodeData = {
   generationPrompt?: string
   imageUrl?: string
   videoUrl?: string
+  outputVersion?: number
+  resultVersions?: NodeResultVersions
+  onViewVersion?: (id: string, index: number) => void
+  onCopyVersion?: (id: string, index: number) => void
+  onUseVersion?: (id: string) => void
+  onResultVideoDuration?: (id: string, url: string, seconds: number) => void
   videoDurationSeconds?: number
   referenceRequirements?: { images: number; videos: number }
   sourceImageUrl?: string
@@ -313,6 +304,8 @@ type WorkflowNodeData = {
   model?: string
   imageSize?: ImageResolutionTier
   size?: string
+  followReferenceSize?: boolean
+  referenceSizeInputUrl?: string
   videoResolution?: VideoResolutionTier
   videoDuration?: number
   lightDirection?: LightDirection
@@ -329,6 +322,7 @@ type WorkflowNodeData = {
   memberCount?: number
   onDelete?: (id: string) => void
   onDownload?: (id: string) => void
+  onPreviewResult?: (media: ResultMedia) => void
   onCopyResult?: (id: string) => void
   resultCopied?: boolean
   onRevealImage?: (id: string) => void
@@ -385,6 +379,13 @@ function imageInputHandleIndex(handleId?: string | null) {
 
 function isImageInputHandle(handleId?: string | null) {
   return imageInputHandleIndex(handleId) !== null
+}
+
+function referenceSizeInputUrl(nodeId: string, nodes: WorkflowNode[], edges: Edge[]) {
+  const first = edges.find(edge => edge.target === nodeId && imageInputHandleIndex(edge.targetHandle) === 1)
+    ?? edges.find(edge => edge.target === nodeId && !edge.targetHandle && nodes.some(source =>
+      source.id === edge.source && source.data.kind !== 'prompt' && source.data.kind !== 'video-reference'))
+  return first && nodes.find(source => source.id === first.source)?.data.imageUrl
 }
 
 function videoInputHandleIndex(handleId?: string | null) {
@@ -1169,11 +1170,22 @@ function numericNodeDimension(value: unknown) {
   return 0
 }
 
+function generationCardWidth({ width, height }: { width: number; height: number }) {
+  // Encoded 16:9 media can be rounded to a whole pixel (for example, 854 × 480).
+  return Math.abs(width / height - 16 / 9) < 0.005 ? 429 : 330
+}
+
 function getWorkflowNodeSize(node: WorkflowNode) {
-  const fallbackWidth = node.data.kind === 'outpaint' ? 410 : node.data.kind === 'repaint' ? 360 : node.data.kind === 'image' || node.data.kind === 'video' || node.data.kind === 'prompt' ? 330 : 312
-  const fallbackHeight = node.data.kind === 'outpaint' ? 780 : node.data.kind === 'repaint' ? 620 : node.data.kind === 'image' || node.data.kind === 'video' ? 680 : node.data.kind === 'reference' ? 360 : 250
+  const fallbackWidth = node.data.kind === 'outpaint' ? 410 : node.data.kind === 'repaint' ? 360 : node.data.kind === 'prompt' ? 330 : 312
+  let fallbackHeight = node.data.kind === 'outpaint' ? 780 : node.data.kind === 'repaint' ? 620 : node.data.kind === 'image' || node.data.kind === 'video' ? 680 : node.data.kind === 'reference' ? 360 : 250
+  const width = node.measured?.width || node.width || numericNodeDimension(node.style?.width)
+    || (node.data.kind === 'image' || node.data.kind === 'video' ? generationCardWidth(parseImageSize(node.data.size)) : fallbackWidth)
+  if (!node.measured?.height && node.data.kind === 'reference' && node.data.size) {
+    const pixels = parseImageSize(node.data.size)
+    fallbackHeight = Math.ceil((width - 24) * pixels.height / pixels.width) + 100
+  }
   return {
-    width: node.measured?.width || node.width || numericNodeDimension(node.style?.width) || fallbackWidth,
+    width,
     height: node.measured?.height || node.height || numericNodeDimension(node.style?.height) || fallbackHeight,
   }
 }
@@ -1199,8 +1211,26 @@ function findFreeWorkflowNodePosition(
   preferred: XYPosition,
   size: { width: number; height: number },
   nodeValues: WorkflowNode[],
+  placement: 'nearby' | 'right' = 'nearby',
 ) {
   const gap = 38
+  const bounds = nodeValues.map(node => {
+    const { x, y } = getAbsoluteNodePosition(node, nodeValues)
+    const { width, height } = getWorkflowNodeSize(node)
+    return { x, y, right: x + width, bottom: y + height }
+  })
+  const overlaps = (point: XYPosition, box: (typeof bounds)[number]) =>
+    point.x < box.right + gap && point.x + size.width + gap > box.x &&
+    point.y < box.bottom + gap && point.y + size.height + gap > box.y
+
+  if (placement === 'right') {
+    const candidate = { ...preferred }
+    for (const box of bounds.sort((a, b) => a.x - b.x)) {
+      if (box.x >= candidate.x + size.width + gap) break
+      if (overlaps(candidate, box)) candidate.x = box.right + gap
+    }
+    return candidate
+  }
   const horizontalStep = size.width + 76
   const verticalStep = size.height + 76
   const verticalOffsets = [0, 1, -1, 2, -2]
@@ -1211,21 +1241,24 @@ function findFreeWorkflowNodePosition(
         x: preferred.x + column * horizontalStep,
         y: preferred.y + row * verticalStep,
       }
-      const overlaps = nodeValues.some((node) => {
-        const nodePosition = getAbsoluteNodePosition(node, nodeValues)
-        const nodeSize = getWorkflowNodeSize(node)
-        return (
-          candidate.x < nodePosition.x + nodeSize.width + gap &&
-          candidate.x + size.width + gap > nodePosition.x &&
-          candidate.y < nodePosition.y + nodeSize.height + gap &&
-          candidate.y + size.height + gap > nodePosition.y
-        )
-      })
-      if (!overlaps) return candidate
+      if (!bounds.some(box => overlaps(candidate, box))) return candidate
     }
   }
 
   return { x: preferred.x + horizontalStep * 6, y: preferred.y }
+}
+
+function findImageResultPosition(
+  source: WorkflowNode, nodeValues: WorkflowNode[], pixels: { width: number; height: number },
+  estimatedHeight: number, offsetY = 0, gap = 100,
+) {
+  const { x, y } = getAbsoluteNodePosition(source, nodeValues)
+  const right = x + Math.max(330, getWorkflowNodeSize(source).width)
+  return findFreeWorkflowNodePosition(
+    { x: right + gap, y: y + offsetY },
+    { width: generationCardWidth(pixels), height: estimatedHeight },
+    nodeValues,
+  )
 }
 
 function readStoredApiConfig() {
@@ -1295,6 +1328,12 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
   const {
     onDelete,
     onDownload,
+    onPreviewResult,
+    resultVersions,
+    onViewVersion,
+    onCopyVersion,
+    onUseVersion,
+    onResultVideoDuration,
     onRevealImage,
     onReplaceImage,
     onReplaceVideo,
@@ -1327,6 +1366,12 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
   } = node.data
   void onDelete
   void onDownload
+  void onPreviewResult
+  void resultVersions
+  void onViewVersion
+  void onCopyVersion
+  void onUseVersion
+  void onResultVideoDuration
   void onRevealImage
   void onReplaceImage
   void onReplaceVideo
@@ -1355,6 +1400,11 @@ function cleanNode(node: WorkflowNode): WorkflowNode {
   void apiMode
   void memberCount
   void promptMentionOptions
+  // Older project packages also included computed card/port state from React Flow.
+  for (const key of [
+    'generationPanelOpen', 'generationModelOptions', 'imageResolutionOptions', 'resultCopied', 'referenceSizeInputUrl',
+    'imageInputConnected', 'imageInputSlots', 'videoInputConnected', 'videoInputSlots', 'outputConnected',
+  ] as const) delete data[key]
   const transientNode = node as WorkflowNode & { resizing?: boolean }
   const { measured, selected, dragging, resizing, ...stableNode } = transientNode
   void measured
@@ -1376,13 +1426,27 @@ function normalizeImportedProject(project: Partial<ProjectFile>): ProjectFile {
   }
 
   const migrated = migrateLegacyPromptNodes((project.nodes as WorkflowNode[]).map(cleanNode), (project.edges as Edge[]).map(cleanEdge))
+  const history = includeCurrentResults(Array.isArray(project.history) ? project.history : [], migrated.nodes)
+  const versions = indexResultVersions(history)
+  const nodes = migrated.nodes.map<WorkflowNode>(node => {
+    const interrupted = node.data.status === 'generating' && !node.data.upscaleJob && !node.data.layerSplitJob
+      && (node.data.kind === 'image' || node.data.kind === 'video' || node.data.kind === 'outpaint')
+    const hasMedia = Boolean(node.data.imageUrl || node.data.videoUrl)
+    const results = hasMedia ? undefined : nodeResultVersions(node, versions)
+    const output = results?.items[results.outputIndex]
+    if (!output && !interrupted) return node
+    return { ...node, data: {
+      ...node.data, ...(output && versionMedia(output)),
+      status: interrupted ? (hasMedia || output ? 'done' : 'idle') : node.data.status,
+    } }
+  })
 
   return {
     version: project.version === 3 ? 3 : project.version === 2 ? 2 : 1,
     projectName: project.projectName || '导入项目',
-    nodes: migrated.nodes,
-    edges: normalizeImageInputEdges(migrated.edges, migrated.nodes),
-    history: Array.isArray(project.history) ? project.history : [],
+    nodes,
+    edges: normalizeImageInputEdges(migrated.edges, nodes),
+    history,
     model3DScenes: project.model3DScenes && typeof project.model3DScenes === 'object'
       ? project.model3DScenes
       : {},
@@ -1507,14 +1571,10 @@ async function buildPackageProject(
 
   const historyWithMedia: GenerationRecord[] = []
   for (const item of history) {
-    const sourceNode = nodes.find((node) => node.id === item.id)
-    const nodeImageUrl = sourceNode?.data.imageUrl
-    const nodeVideoUrl = sourceNode?.data.videoUrl
-    const isVideoHistory = item.mediaType === 'video' || Boolean(item.videoUrl)
     historyWithMedia.push({
       ...item,
-      imageUrl: await cacheImage(item.imageUrl || (!isVideoHistory && item.status === '成功' ? nodeImageUrl : undefined)),
-      videoUrl: await cacheVideo(item.videoUrl || (isVideoHistory && item.status === '成功' ? nodeVideoUrl : undefined)),
+      imageUrl: await cacheImage(item.imageUrl),
+      videoUrl: await cacheVideo(item.videoUrl),
     })
   }
 
@@ -1641,15 +1701,16 @@ async function downloadMediaFile(mediaUrl: string, filename: string) {
   })
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as { error?: string } | null
-    throw new Error(payload?.error || '视频下载失败')
+    throw new Error(payload?.error || '素材下载失败')
   }
   const downloadUrl = URL.createObjectURL(await response.blob())
   downloadImage(downloadUrl, filename)
   window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000)
 }
 
-function imageBaseName(projectName: string, nodeId: string) {
-  return `${projectName || 'AI画布'}-${nodeId}`
+function imageBaseName(projectName: string, nodeId: string, versions?: NodeResultVersions) {
+  const suffix = versions && versions.items.length > 1 ? `-v${versions.viewedIndex + 1}` : ''
+  return `${projectName || 'AI画布'}-${nodeId}${suffix}`
 }
 
 async function saveImageAndOpenFolder(imageUrl: string, filename: string) {
@@ -1906,11 +1967,11 @@ function imageFileAsDataUrl(file: Blob) {
   })
 }
 
-function loadCanvasImage(imageUrl: string) {
+function loadCanvasImage(imageUrl: string, errorMessage = '重绘图像加载失败') {
   return new Promise<HTMLImageElement>((resolve, reject) => {
     const image = new Image()
     image.onload = () => resolve(image)
-    image.onerror = () => reject(new Error('重绘图像加载失败'))
+    image.onerror = () => reject(new Error(errorMessage))
     image.src = imageUrl
   })
 }
@@ -1926,7 +1987,31 @@ async function cacheCanvasImage(imageUrl: string) {
   return payload.imageUrl
 }
 
-async function fitImageToExactSize(imageUrl: string, width: number, height: number) {
+async function readReferenceDimensions(url: string) {
+  const message = '无法读取 Image 1 的原始尺寸，请检查或更换参考图。'
+  const image = await loadCanvasImage(url, message)
+  if (!image.naturalWidth || !image.naturalHeight) throw new Error(message)
+  return { width: image.naturalWidth, height: image.naturalHeight }
+}
+
+function referenceRequestSize(config: ApiConfig, width: number, height: number) {
+  if (config.mode === 'mock') return `${width}x${height}`
+  const ratio = width / height
+  if (config.mode === 'apimart' && config.model === 'midjourney-v8.2') {
+    const limit = config.imageSize === '2K' ? 4 : 14
+    if (ratio > limit) return `${limit}:1`
+    if (ratio < 1 / limit) return `1:${limit}`
+    return `${width}:${height}`
+  }
+  // Choose the supported ratio that discards the least area during a centered crop.
+  const distance = (option: typeof aspectRatioOptions[number]) => {
+    const [w, h] = option.value.split(':').map(Number)
+    return Math.abs(Math.log(ratio / (w / h)))
+  }
+  return aspectRatioOptions.reduce((best, option) => distance(option) < distance(best) ? option : best).size
+}
+
+async function fitImageToExactSize(imageUrl: string, width: number, height: number, fit: 'stretch' | 'cover' = 'stretch') {
   const safeWidth = Math.max(1, Math.round(width))
   const safeHeight = Math.max(1, Math.round(height))
   const image = await loadCanvasImage(await imageAsDataUrl(imageUrl))
@@ -1939,7 +2024,15 @@ async function fitImageToExactSize(imageUrl: string, width: number, height: numb
   if (!context) throw new Error('浏览器无法恢复原图尺寸。')
   context.imageSmoothingEnabled = true
   context.imageSmoothingQuality = 'high'
-  context.drawImage(image, 0, 0, safeWidth, safeHeight)
+  if (fit === 'cover') {
+    const scale = Math.max(safeWidth / image.naturalWidth, safeHeight / image.naturalHeight)
+    const cropWidth = safeWidth / scale
+    const cropHeight = safeHeight / scale
+    context.drawImage(image, (image.naturalWidth - cropWidth) / 2, (image.naturalHeight - cropHeight) / 2,
+      cropWidth, cropHeight, 0, 0, safeWidth, safeHeight)
+  } else {
+    context.drawImage(image, 0, 0, safeWidth, safeHeight)
+  }
   return cacheCanvasImage(canvas.toDataURL('image/png'))
 }
 
@@ -2436,6 +2529,7 @@ function ApiModeSelect({ value, onChange }: { value: ApiMode; onChange: (mode: A
 
 function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const updateNodeInternals = useUpdateNodeInternals()
+  const resultVideoRef = useRef<HTMLVideoElement>(null)
   const replaceImageInputRef = useRef<HTMLInputElement>(null)
   const replaceVideoInputRef = useRef<HTMLInputElement>(null)
   const promptTextareaRef = useRef<HTMLTextAreaElement>(null)
@@ -2452,6 +2546,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const [mentionSelection, setMentionSelection] = useState(0)
   const [referenceImageRatio, setReferenceImageRatio] = useState('—')
   const [referencePixelSize, setReferencePixelSize] = useState('')
+  const [decodedSize, setDecodedSize] = useState<{ url: string; width: number; height: number }>()
   const isImage = data.kind === 'image'
   const isVideo = data.kind === 'video'
   const isElementEditResult = isImage && Boolean(data.elementEditOperations?.length)
@@ -2466,6 +2561,11 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
   const isOutpaint = data.kind === 'outpaint'
   const isGroup = data.kind === 'group'
   const isGenerating = data.status === 'generating'
+  const versions = data.resultVersions
+  const viewedVersion = versions?.items[versions.viewedIndex]
+  const shownImageUrl = viewedVersion?.type === 'image' ? viewedVersion.url : data.imageUrl
+  const shownVideoUrl = viewedVersion?.type === 'video' ? viewedVersion.url : data.videoUrl
+  const resultUrl = isVideo ? shownVideoUrl : (isImage || isOutpaint || isRepaint) ? shownImageUrl : undefined
   const isDone = data.status === 'done'
   const isError = data.status === 'error'
   const promptMentionOptions = supportsPromptMentions ? (data.promptMentionOptions || []) : []
@@ -2475,8 +2575,29 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
     return option.token.toLocaleLowerCase().includes(query) || option.label.toLocaleLowerCase().includes(query)
   })
   const visiblePromptMentions = activePromptMentions(promptDraft, promptMentionBindings)
+  const followsReference = isImage && !isDirectEditResult && data.followReferenceSize === true
+  const firstReferenceUrl = followsReference ? data.referenceSizeInputUrl : undefined
+  const [referenceMeasurement, setReferenceMeasurement] = useState<{ url: string; size?: string }>()
+  useEffect(() => {
+    if (!firstReferenceUrl) {
+      setReferenceMeasurement(undefined)
+      return
+    }
+    let current = true
+    readReferenceDimensions(firstReferenceUrl).then(({ width, height }) => {
+      if (current) setReferenceMeasurement({ url: firstReferenceUrl, size: `${width}x${height}` })
+    }, () => {
+      if (current) setReferenceMeasurement({ url: firstReferenceUrl })
+    })
+    return () => { current = false }
+  }, [firstReferenceUrl])
+  const measurement = referenceMeasurement?.url === firstReferenceUrl ? referenceMeasurement : undefined
   const selectedAspectRatio = getAspectRatioOption(data.size)
-  const nodePixelSize = parseImageSize(data.size)
+  const frameSize = (isGenerating || !resultUrl ? measurement?.size : viewedVersion?.size) || data.size
+  const autoSize = !frameSize || frameSize === 'auto'
+  const nodePixelSize = autoSize && !isGenerating && decodedSize && decodedSize.url === resultUrl
+    ? decodedSize : parseImageSize(frameSize)
+  const cardWidth = isImage || isVideo ? generationCardWidth(nodePixelSize) : undefined
   const nodeFrameAspectRatio = `${nodePixelSize.width} / ${nodePixelSize.height}`
   const sourceWidth = data.sourceWidth || 1024
   const sourceHeight = data.sourceHeight || 1024
@@ -2552,7 +2673,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
       observer.disconnect()
       window.removeEventListener('resize', ensureVisible)
     }
-  }, [imageSlotSignature, nodeId, updateNodeInternals, panelOpen, data.size])
+  }, [imageSlotSignature, nodeId, updateNodeInternals, panelOpen, data.size, nodeFrameAspectRatio])
 
   useEffect(() => {
     if (!isReference) return
@@ -2575,6 +2696,27 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
       setMentionMenuOpen(false)
     }
   }, [isGenerating, panelOpen])
+
+  function openResultPreview(event: ReactMouseEvent<HTMLButtonElement>) {
+    event.stopPropagation()
+    if (!resultUrl || isGenerating || !data.onPreviewResult) return
+    const player = resultVideoRef.current
+    const playback = player ? {
+      currentTime: player.ended ? 0 : player.currentTime,
+      paused: player.paused || player.ended,
+      muted: player.muted,
+      volume: player.volume,
+      playbackRate: player.playbackRate,
+    } : undefined
+    player?.pause()
+    data.onPreviewResult({
+      nodeId,
+      type: isVideo ? 'video' : 'image',
+      url: resultUrl,
+      initialRatio: nodePixelSize.width / nodePixelSize.height,
+      playback,
+    })
+  }
 
   const selectNodeModel = (modelId: string) => {
     if (isImage) data.onChangeImageModel?.(nodeId, modelId)
@@ -2776,6 +2918,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
     <div className={`workflow-node-shell ${selected ? 'selected' : ''}`}>
     <div
       className={`workflow-node ${selected ? 'selected' : ''} ${data.kind}`}
+      style={cardWidth ? { width: cardWidth } : undefined}
       title={mediaDataForCopy(data) ? '按住 Alt 并用鼠标左键拖动，可创建保留提示词的独立副本' : undefined}
     >
       {selected && (isReference || isImage) && (
@@ -2925,7 +3068,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
       {isOutpaint && promptEditor}
 
       {(isImage || isReference) && (
-        data.imageUrl && !isGenerating ? (
+        shownImageUrl && !isGenerating ? (
           isReference && (data.model3DSceneId || data.sketch) ? (
             <button
               className="model3d-reference-preview nodrag nopan nowheel"
@@ -2950,15 +3093,18 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
           ) : (
             <img
               className="node-image"
-              src={data.imageUrl}
+              src={shownImageUrl}
               alt={isReference ? (data.sourceName || data.title) : data.title}
               draggable={false}
               style={isImage ? { aspectRatio: nodeFrameAspectRatio } : undefined}
               onLoad={(event) => {
-                if (!isReference) return
                 const { naturalWidth, naturalHeight } = event.currentTarget
-                setReferenceImageRatio(getReferenceImageRatio(naturalWidth, naturalHeight))
-                setReferencePixelSize(`${naturalWidth} × ${naturalHeight}`)
+                if (isReference) {
+                  setReferenceImageRatio(getReferenceImageRatio(naturalWidth, naturalHeight))
+                  setReferencePixelSize(`${naturalWidth} × ${naturalHeight}`)
+                } else if (shownImageUrl && naturalWidth && naturalHeight) {
+                  setDecodedSize({ url: shownImageUrl, width: naturalWidth, height: naturalHeight })
+                }
               }}
             />
           )
@@ -2991,6 +3137,11 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             controls
             playsInline
             preload="metadata"
+            onLoadedMetadata={({ currentTarget: video }) => {
+              if (data.videoUrl && data.videoDurationSeconds !== video.duration) {
+                data.onResultVideoDuration?.(nodeId, data.videoUrl, video.duration)
+              }
+            }}
           />
         ) : (
           <div className="node-empty reference-video-empty" aria-live="polite">
@@ -3002,14 +3153,24 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
       )}
 
       {isVideo && (
-        data.videoUrl && !isGenerating ? (
+        shownVideoUrl && !isGenerating ? (
           <video
+            ref={resultVideoRef}
             className="node-video nodrag nopan nowheel"
-            src={data.videoUrl}
+            src={shownVideoUrl}
             controls
             playsInline
             preload="metadata"
             style={{ aspectRatio: nodeFrameAspectRatio }}
+            onLoadedMetadata={({ currentTarget: video }) => {
+              if (video.videoWidth && video.videoHeight) {
+                setDecodedSize({ url: shownVideoUrl, width: video.videoWidth, height: video.videoHeight })
+              }
+              if (video.duration !== viewedVersion?.videoDurationSeconds ||
+                (shownVideoUrl === data.videoUrl && video.duration !== data.videoDurationSeconds)) {
+                data.onResultVideoDuration?.(nodeId, shownVideoUrl, video.duration)
+              }
+            }}
           />
         ) : (
           <div
@@ -3036,7 +3197,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
       {isOutpaint && (
         <OutpaintRangeEditor
           sourceImageUrl={data.sourceImageUrl}
-          resultImageUrl={data.imageUrl}
+          resultImageUrl={data.imageUrl ? shownImageUrl : undefined}
           sourceWidth={sourceWidth}
           sourceHeight={sourceHeight}
           insets={outpaintInsets}
@@ -3052,6 +3213,12 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
       {(
         <>
           <div className="node-actions">
+            {versions && versions.items.length > 1 && (
+              <ResultVersionPicker versions={versions} disabled={isGenerating}
+                onView={index => data.onViewVersion?.(nodeId, index)}
+                onCopy={index => data.onCopyVersion?.(nodeId, index)}
+                onUse={() => data.onUseVersion?.(nodeId)} />
+            )}
             {isUpscaleResult && <button className="node-layer-edit-button nodrag nopan" type="button" title="查看高清修复任务和前后对比" onClick={() => data.onOpenUpscale?.(nodeId)}><ScanSearch size={14} /><span>{data.imageUrl ? '修复对比' : '查看任务'}</span></button>}
             {isLayerSplitResult && (
               <button
@@ -3062,6 +3229,19 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
               >
                 <Layers size={14} />
                 <span>图层 / PSD</span>
+              </button>
+            )}
+            {resultUrl && !isGenerating && (
+              <button
+                className="nodrag nopan"
+                type="button"
+                aria-haspopup="dialog"
+                aria-label={isVideo ? '放大查看视频' : '放大查看图片'}
+                title={isVideo ? '放大查看视频' : '放大查看图片'}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={openResultPreview}
+              >
+                <Eye size={14} />
               </button>
             )}
             {mediaDataForCopy(data) && (
@@ -3130,12 +3310,12 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
                 ) : null}
               </>
             )}
-            {data.imageUrl && (
-              <button type="button" title="下载图像" onClick={() => data.onDownload?.(nodeId)}>
+            {(isVideo ? shownVideoUrl && !isGenerating : shownImageUrl) && (
+              <button className="nodrag nopan" type="button" title={isVideo ? '下载视频' : '下载图像'} onClick={() => data.onDownload?.(nodeId)}>
                 <Download size={14} />
               </button>
             )}
-            {(isImage || isOutpaint) && data.imageUrl && (
+            {(isImage || isOutpaint) && shownImageUrl && (
               <button type="button" title="保存并查看所在文件夹" onClick={() => data.onRevealImage?.(nodeId)}>
                 <FolderOpen size={14} />
               </button>
@@ -3206,8 +3386,9 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             <GenerationSelect
               label={isVideo ? '视频画面比例' : '图像画面比例'}
               menuLabel="可选画面比例"
-              value={isMuseVideo && data.size === 'auto' ? 'auto' : selectedAspectRatio.size}
+              value={followsReference ? 'reference' : isMuseVideo && data.size === 'auto' ? 'auto' : selectedAspectRatio.size}
               options={[
+                ...(isImage ? [{ value: 'reference', label: 'Reference Size' }] : []),
                 ...(isMuseVideo ? [{ value: 'auto', label: '自动（跟随参考图）' }] : []),
                 ...aspectRatioOptions.map((option) => ({ value: option.size, label: option.label })),
               ]}
@@ -3233,7 +3414,7 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
               className="generation-submit generation-submit-run"
               type="button"
               onClick={() => data.onGenerate?.(nodeId)}
-              disabled={isGenerating}
+              disabled={isGenerating || (followsReference && !firstReferenceUrl)}
               aria-label={isGenerating ? '正在生成' : '运行生成'}
               title={isGenerating ? '正在生成' : '运行生成'}
             >
@@ -3241,6 +3422,13 @@ function WorkflowCard({ data, id: nodeId, selected }: NodeProps<WorkflowNode>) {
             </button>
           )}
         </div>
+        {followsReference && (
+          <div className="generation-panel-hint reference-size-hint" role="status">
+            {!firstReferenceUrl ? '将参考图连接到 Image 1 后即可生成'
+              : measurement?.size ? `Image 1 · ${measurement.size.replace('x', ' × ')} px`
+              : measurement ? '无法读取 Image 1 的尺寸，请检查参考图' : '正在读取 Image 1 的尺寸…'}
+          </div>
+        )}
         {isVideo && (
           <div className="generation-panel-footer">
             <label className="generation-duration-setting">
@@ -3358,9 +3546,7 @@ export default function App() {
     sceneId: string | null
     scene: SavedModel3DScene | null
   }>({ nodeId: null, sceneId: null, scene: null })
-  const [showHistoryPanel, setShowHistoryPanel] = useState(false)
-  const [historyMediaPreview, setHistoryMediaPreview] = useState<HistoryMediaPreview | null>(null)
-  const [historyImageNaturalSize, setHistoryImageNaturalSize] = useState<{ width: number; height: number } | null>(null)
+  const [resultPreview, setResultPreview] = useState<ResultMedia | null>(null)
   const [lightDirectionNodeId, setLightDirectionNodeId] = useState<string | null>(null)
   const [showQuickWorkflows, setShowQuickWorkflows] = useState(false)
   const [showPromptLibrary, setShowPromptLibrary] = useState(false)
@@ -3376,6 +3562,18 @@ export default function App() {
   const [change2ProModelMessage, setChange2ProModelMessage] = useState('')
   const change2ProModelRequestIdRef = useRef(0)
   const [history, setHistory] = useState<GenerationRecord[]>([])
+  const generationProjectRef = useRef(0)
+  const [versionChoices, setVersionChoices] = useState(() => new Map<string, VersionChoice>())
+  const historyIndex = useMemo(() => indexResultVersions(history), [history])
+  const versionsByNode = useMemo(() => {
+    const results = new Map<string, NodeResultVersions>()
+    for (const node of nodes) {
+      const versions = nodeResultVersions(node, historyIndex, versionChoices.get(node.id))
+      if (versions) results.set(node.id, versions)
+    }
+    return results
+  }, [historyIndex, nodes, versionChoices])
+  const previewVersions = resultPreview ? versionsByNode.get(resultPreview.nodeId) : undefined
   const [isExporting, setIsExporting] = useState(false)
   const [isProjectSaving, setIsProjectSaving] = useState(false)
   const [openedProjectFileName, setOpenedProjectFileName] = useState('')
@@ -3575,15 +3773,57 @@ export default function App() {
 
   const updateNodeData = useCallback(
     (nodeId: string, patch: Partial<WorkflowNodeData>) => {
+      const changes = 'imageUrl' in patch || 'videoUrl' in patch ? { outputVersion: undefined, ...patch } : patch
       setNodes((current) =>
         current.map((node) =>
-          node.id === nodeId ? { ...node, data: { ...node.data, ...patch } } : node,
+          node.id === nodeId ? { ...node, data: { ...node.data, ...changes } } : node,
         ),
       )
       markDirty()
     },
     [markDirty, setNodes],
   )
+
+  function viewVersion(nodeId: string, index: number) {
+    const versions = versionsByNode.get(nodeId)
+    if (!versions?.items[index]) return
+    setVersionChoices(current => new Map(current).set(nodeId, { index, count: versions.items.length }))
+  }
+
+  function useVersionAsOutput(nodeId: string) {
+    const node = nodes.find(item => item.id === nodeId)
+    const versions = versionsByNode.get(nodeId)
+    if (!node || node.data.status === 'generating' || !versions || versions.viewedIndex === versions.outputIndex) return
+    const version = versions.items[versions.viewedIndex]
+    setHistory(current => includeCurrentResults(current, [node]))
+    updateNodeData(nodeId, { ...versionMedia(version), outputVersion: versions.viewedIndex + 1 })
+  }
+
+  const rememberResultVideoDuration = useCallback((nodeId: string, videoUrl: string, seconds: number) => {
+    if (!Number.isFinite(seconds) || seconds <= 0) return
+    setHistory(records => records.map(record =>
+      record.id === nodeId && record.status === '成功' && record.videoUrl === videoUrl && record.videoDurationSeconds !== seconds
+        ? { ...record, videoDurationSeconds: seconds } : record,
+    ))
+    setNodes(current => current.map(node =>
+      node.id === nodeId && node.data.videoUrl === videoUrl && node.data.videoDurationSeconds !== seconds
+        ? { ...node, data: { ...node.data, videoDurationSeconds: seconds } } : node,
+    ))
+  }, [setNodes])
+
+  function viewAdjacentResult(index: number) {
+    const version = previewVersions?.items[index]
+    if (!resultPreview || !version) return
+    const { width, height } = parseImageSize(version.size)
+    viewVersion(resultPreview.nodeId, index)
+    setResultPreview({ nodeId: resultPreview.nodeId, type: version.type, url: version.url, initialRatio: width / height })
+  }
+
+  const viewedMediaData = useCallback((node: WorkflowNode) => {
+    const versions = versionsByNode.get(node.id)
+    if (!versions) return node.data
+    return { ...node.data, ...versionCopyFields(versions.items[versions.viewedIndex]) }
+  }, [versionsByNode])
 
   const deleteNodesByIds = useCallback(
     (nodeIds: string[]) => {
@@ -3605,6 +3845,11 @@ export default function App() {
       )
 
       setNodes((current) => current.filter((node) => !idsToDelete.has(node.id)))
+      setVersionChoices(current => {
+        const remaining = new Map(current)
+        idsToDelete.forEach(id => remaining.delete(id))
+        return remaining
+      })
       setEdges((current) => current.filter((edge) => !idsToDelete.has(edge.source) && !idsToDelete.has(edge.target)))
       setSelectedNodeId((current) => (current && idsToDelete.has(current) ? null : current))
       setLightDirectionNodeId((current) => (current && idsToDelete.has(current) ? null : current))
@@ -3744,7 +3989,7 @@ export default function App() {
 
   const handleDeleteKey = useCallback(
     (event: KeyboardEvent) => {
-      if (event.key !== 'Delete' || showSettings || showModelStudio || sketchSession || elementEditSession || multiAngleSession || layerSplitSession || upscaleSession || groupDialog || historyMediaPreview || lightDirectionNodeId || isKeyboardControlTarget(event.target)) return
+      if (event.key !== 'Delete' || showSettings || showModelStudio || sketchSession || elementEditSession || multiAngleSession || layerSplitSession || upscaleSession || groupDialog || resultPreview || lightDirectionNodeId || isKeyboardControlTarget(event.target)) return
 
       const selectedNodeIds = nodes.filter((node) => node.selected).map((node) => node.id)
       if (selectedNodeId && !selectedNodeIds.includes(selectedNodeId)) selectedNodeIds.push(selectedNodeId)
@@ -3753,24 +3998,13 @@ export default function App() {
       event.preventDefault()
       deleteNodesByIds(selectedNodeIds)
     },
-    [deleteNodesByIds, elementEditSession, groupDialog, historyMediaPreview, lightDirectionNodeId, multiAngleSession, layerSplitSession, upscaleSession, nodes, selectedNodeId, showModelStudio, sketchSession, showSettings],
+    [deleteNodesByIds, elementEditSession, groupDialog, resultPreview, lightDirectionNodeId, multiAngleSession, layerSplitSession, upscaleSession, nodes, selectedNodeId, showModelStudio, sketchSession, showSettings],
   )
 
   useEffect(() => {
     window.addEventListener('keydown', handleDeleteKey, true)
     return () => window.removeEventListener('keydown', handleDeleteKey, true)
   }, [handleDeleteKey])
-
-  useEffect(() => {
-    if (!historyMediaPreview) return
-
-    const handlePreviewEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setHistoryMediaPreview(null)
-    }
-
-    window.addEventListener('keydown', handlePreviewEscape, true)
-    return () => window.removeEventListener('keydown', handlePreviewEscape, true)
-  }, [historyMediaPreview])
 
   useEffect(() => {
     if (!lightDirectionNodeId) return
@@ -3783,80 +4017,49 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleLightDirectionEscape, true)
   }, [lightDirectionNodeId])
 
-  const downloadNodeImage = useCallback(
-    (nodeId: string) => {
+  const downloadNodeMedia = useCallback(
+    async (nodeId: string) => {
       const node = nodes.find((item) => item.id === nodeId)
-      if (node?.data.imageUrl) {
-        downloadImage(node.data.imageUrl, `${imageBaseName(projectName, nodeId)}.png`)
+      if (!node) return
+      const data = viewedMediaData(node)
+      const versions = versionsByNode.get(nodeId)
+      const fileName = imageBaseName(projectName, nodeId, versions)
+      try {
+        if (data.kind === 'video' && data.videoUrl) {
+          await downloadMediaFile(data.videoUrl, `${fileName}.mp4`)
+          setToast('视频已下载到浏览器下载目录。')
+        } else if (data.imageUrl) {
+          if (/^https?:\/\//i.test(data.imageUrl)) await downloadMediaFile(data.imageUrl, `${fileName}.png`)
+          else downloadImage(data.imageUrl, `${fileName}.png`)
+        }
+      } catch (error) {
+        setToast(error instanceof Error ? error.message : '素材下载失败')
       }
     },
-    [nodes, projectName],
+    [nodes, projectName, versionsByNode, viewedMediaData],
   )
 
   const revealNodeImage = useCallback(
     async (nodeId: string) => {
       const node = nodes.find((item) => item.id === nodeId)
-      if (!node?.data.imageUrl) {
+      const imageUrl = node && viewedMediaData(node).imageUrl
+      if (!imageUrl) {
         setToast('这个节点还没有可查看的图像。')
         return
       }
 
-      const fileBaseName = imageBaseName(projectName, nodeId)
+      const fileBaseName = imageBaseName(projectName, nodeId, versionsByNode.get(nodeId))
 
       try {
-        const result = await saveImageAndOpenFolder(node.data.imageUrl, fileBaseName)
+        const result = await saveImageAndOpenFolder(imageUrl, fileBaseName)
         setToast(result?.downloaded ? '图像已下载到浏览器下载目录。' : `已保存并打开所在文件夹：${result?.folderPath || 'generated-images'}`)
       } catch (error) {
-        downloadImage(node.data.imageUrl, `${fileBaseName}.png`)
+        downloadImage(imageUrl, `${fileBaseName}.png`)
         const message = error instanceof Error ? error.message : '无法打开本地文件夹'
         setToast(`${message}，已改为浏览器下载。可在浏览器下载列表中打开所在文件夹。`)
       }
     },
-    [nodes, projectName],
-  )
-
-  const revealHistoryImage = useCallback(
-    async (item: GenerationRecord) => {
-      const imageUrl = item.imageUrl || nodes.find((node) => node.id === item.id)?.data.imageUrl
-      if (!imageUrl) {
-        setToast('这条历史记录没有可打开的图像。')
-        return
-      }
-
-      try {
-        const result = await saveImageAndOpenFolder(imageUrl, imageBaseName(projectName, item.id))
-        setToast(result?.downloaded ? '图像已下载到浏览器下载目录。' : `已保存并打开所在文件夹：${result?.folderPath || 'generated-images'}`)
-      } catch (error) {
-        const message = error instanceof Error ? error.message : '无法打开本地文件夹'
-        setToast(message)
-      }
-    },
-    [nodes, projectName],
-  )
-
-  const downloadHistoryMedia = useCallback(
-    async (item: GenerationRecord) => {
-      const sourceNode = nodes.find((node) => node.id === item.id)
-      const videoUrl = item.videoUrl || (item.status === '成功' ? sourceNode?.data.videoUrl : undefined)
-      const isVideoHistory = item.mediaType === 'video' || Boolean(item.videoUrl)
-      if (!isVideoHistory) {
-        await revealHistoryImage(item)
-        return
-      }
-      if (!videoUrl) {
-        setToast('这条历史记录没有可下载的视频。')
-        return
-      }
-
-      try {
-        await downloadMediaFile(videoUrl, `${imageBaseName(projectName, item.id)}.mp4`)
-        setToast('视频已下载到浏览器下载目录。')
-      } catch (error) {
-        const message = error instanceof Error ? error.message : '视频下载失败'
-        setToast(message)
-      }
-    },
-    [nodes, projectName, revealHistoryImage],
+    [nodes, projectName, versionsByNode, viewedMediaData],
   )
 
   const useNodePrompt = useCallback((value: string) => {
@@ -3866,8 +4069,12 @@ export default function App() {
 
   const changeNodeSize = useCallback(
     (nodeId: string, size: string) => {
+      if (size === 'reference') {
+        updateNodeData(nodeId, { followReferenceSize: true })
+        return
+      }
       const ratio = getAspectRatioOption(size)
-      updateNodeData(nodeId, { size })
+      updateNodeData(nodeId, { size, followReferenceSize: undefined })
       setToast(size === 'auto' ? '画面比例已设为自动：有图时跟随参考图，纯文字生成默认 16:9。' : `尺寸比例已设为 ${ratio.label}（${size}）。`)
     },
     [updateNodeData],
@@ -4028,13 +4235,14 @@ export default function App() {
       dropPosition: XYPosition,
       initialData: Partial<WorkflowNodeData> = {},
     ) => {
-      const outputSize = sourceNode.data.size || apiConfig.size || defaultApiConfig.size
+      const versions = versionsByNode.get(sourceNode.id)
+      const outputSize = versions?.items[versions.outputIndex]?.size || sourceNode.data.size || apiConfig.size || defaultApiConfig.size
       const imageNodeId = id('image')
       const createdAt = new Date().toLocaleString('zh-CN')
       const releasedY = dropPosition.y - 180
       const sourcePosition = getAbsoluteNodePosition(sourceNode, nodes)
       const position = {
-        x: sourcePosition.x + 380,
+        x: sourcePosition.x + Math.max(380, getWorkflowNodeSize(sourceNode).width + 50),
         y: Math.min(Math.max(releasedY, sourcePosition.y - 40), sourcePosition.y + 120),
       }
       const imageNode: WorkflowNode = {
@@ -4080,7 +4288,7 @@ export default function App() {
       }, 0)
       setToast(`已创建 ${outputSize} 生成框，请填写提示词后点击生成。`)
     },
-    [apiConfig, flowInstance, markDirty, nodes, setEdges, setNodes],
+    [apiConfig, flowInstance, markDirty, nodes, setEdges, setNodes, versionsByNode],
   )
 
   const openLightDirectionEditor = useCallback(
@@ -4196,11 +4404,11 @@ export default function App() {
     const { imageUrl: _imageUrl, ...settings } = input
     void _imageUrl
     const job: UpscaleJob = { ...settings, requestId: result.requestId, width: result.width, height: result.height }
-    const nodeId = id('upscale-result'), position = getAbsoluteNodePosition(source, nodes)
+    const nodeId = id('upscale-result')
     const mode = upscaleModes.find(item => item.id === input.mode)!
     const resultNode: WorkflowNode = {
       id: nodeId, type: 'workflow', selected: true,
-      position: findFreeWorkflowNodePosition({ x: position.x + 430, y: position.y }, { width: 330, height: 500 }, nodes),
+      position: findImageResultPosition(source, nodes, output, 500),
       data: { kind: 'image', title: '高清修复', model: `Topaz ${mode.model}`, status: 'generating', sourceImageUrl,
         upscaleJob: job, sourceWidth: input.width, sourceHeight: input.height, size: `${output.width}x${output.height}`,
         prompt: source.data.prompt, generationPrompt: source.data.generationPrompt,
@@ -4263,10 +4471,9 @@ export default function App() {
     const result = await layerRequest<{ requestId: string }>('submit', input)
     const job: LayerSplitJob = { requestId: result.requestId, numLayers: input.numLayers, width: input.width, height: input.height, caption: input.caption }
     const nodeId = id('layer-result')
-    const position = getAbsoluteNodePosition(source, nodes)
     const resultNode: WorkflowNode = {
       id: nodeId, type: 'workflow', selected: true,
-      position: findFreeWorkflowNodePosition({ x: position.x + 430, y: position.y }, { width: 330, height: 450 }, nodes),
+      position: findImageResultPosition(source, nodes, input, 450),
       data: {
         kind: 'image', title: '分层结果', model: 'Qwen-Image-Layered', status: 'generating', sourceImageUrl,
         layerSplitJob: job, sourceWidth: input.width, sourceHeight: input.height, size: `${input.width}x${input.height}`,
@@ -4305,10 +4512,10 @@ export default function App() {
     const sourceImageUrl = await cacheCanvasImage(layerSplitSession.sourceImageUrl)
     const canvas = await renderLayerDocument(doc)
     const imageUrl = await cacheCanvasImage(canvas.toDataURL('image/png'))
-    const nodeId = id('layer-result'), position = getAbsoluteNodePosition(source, nodes)
+    const nodeId = id('layer-result')
     const resultNode: WorkflowNode = {
       id: nodeId, type: 'workflow', selected: true,
-      position: findFreeWorkflowNodePosition({ x: position.x + 430, y: position.y }, { width: 330, height: 450 }, nodes),
+      position: findImageResultPosition(source, nodes, doc, 450),
       data: { kind: 'image', title: '精细分层结果', model: 'SAM 3 + GPT', status: 'done', sourceImageUrl, imageUrl,
         layerDocument: doc, sourceWidth: doc.width, sourceHeight: doc.height, size: `${doc.width}x${doc.height}`,
         sourceName: source.data.sourceName || source.data.title, createdAt: new Date().toLocaleString('zh-CN') },
@@ -4327,11 +4534,10 @@ export default function App() {
     // Keep the original canvas and offsets so extracted elements line up when reused as references.
     const canvas = await renderLayerDocument({ ...doc, layers: [{ ...layer, visible: true }] })
     const imageUrl = await cacheCanvasImage(canvas.toDataURL('image/png'))
-    const position = getAbsoluteNodePosition(source, nodes)
     const nodeId = id('layer-element')
     const node: WorkflowNode = {
       id: nodeId, type: 'workflow', selected: true,
-      position: findFreeWorkflowNodePosition({ x: position.x + 420, y: position.y }, { width: 312, height: 450 }, nodes),
+      position: findImageResultPosition(source, nodes, doc, 450, 0, 90),
       data: { kind: 'image', title: layer.name, layerElementName: layer.name, model: '图层提取', imageUrl, status: 'done', size: `${doc.width}x${doc.height}`, sourceName: layer.name, createdAt: new Date().toLocaleString('zh-CN') },
     }
     setNodes(current => [...current.map(item => ({ ...item, selected: false })), node])
@@ -4354,10 +4560,10 @@ export default function App() {
         return
       }
 
-      const sourcePosition = getAbsoluteNodePosition(sourceNode, nodes)
       const outputNodeId = id('image')
       const createdAt = new Date().toLocaleString('zh-CN')
-      const outputSize = sourceNode.data.size || apiConfig.size || defaultApiConfig.size
+      const versions = versionsByNode.get(sourceNode.id)
+      const outputSize = versions?.items[versions.outputIndex]?.size || sourceNode.data.size || apiConfig.size || defaultApiConfig.size
       const imageModel = apiConfig.mode === 'apimart'
         ? findApiMartModel(sourceNode.data.kind === 'image' ? sourceNode.data.model || apiConfig.model : apiConfig.model)
         : null
@@ -4369,11 +4575,7 @@ export default function App() {
         : apiConfig.imageSize
       const configForNode = { ...apiConfig, model: selectedModel, imageSize, size: outputSize }
       const adjustedPrompt = promptWithLightDirection(relightGenerationPrompt, lightDirection)
-      const outputPosition = findFreeWorkflowNodePosition(
-        { x: sourcePosition.x + 430, y: sourcePosition.y },
-        { width: 330, height: 480 },
-        nodes,
-      )
+      const outputPosition = findImageResultPosition(sourceNode, nodes, parseImageSize(outputSize), 480)
       const outputNode: WorkflowNode = {
         id: outputNodeId,
         type: 'workflow',
@@ -4466,7 +4668,7 @@ export default function App() {
         setIsGenerating(false)
       }
     },
-    [apiConfig, flowInstance, markDirty, nodes, setEdges, setNodes, updateNodeData],
+    [apiConfig, flowInstance, markDirty, nodes, setEdges, setNodes, updateNodeData, versionsByNode],
   )
 
   const createInputNodeFromTarget = useCallback(
@@ -4650,9 +4852,9 @@ export default function App() {
   const captureSelectedMedia = useCallback((nodeIds?: string[]) => {
     const selectedIds = collectNodeFamilyIds(nodeIds ?? nodes.filter((node) => node.selected).map((node) => node.id), nodes)
     return createCanvasMediaClipboard(nodes.filter((node) => selectedIds.has(node.id)).map((node) => ({
-      ...node, position: getAbsoluteNodePosition(node, nodes),
+      ...node, data: viewedMediaData(node), position: getAbsoluteNodePosition(node, nodes),
     })))
-  }, [nodes])
+  }, [nodes, viewedMediaData])
 
   const copyNodeResults = useCallback(async (nodeIds?: string[]) => {
     const clipboard = captureSelectedMedia(nodeIds)
@@ -4665,14 +4867,14 @@ export default function App() {
     }
   }, [captureSelectedMedia])
 
-  const pasteNodeResults = useCallback((clipboard: CanvasMediaClipboard, position?: XYPosition) => {
+  const pasteNodeResults = useCallback((clipboard: CanvasMediaClipboard, position?: XYPosition, besideNodeId?: string) => {
     const center = flowInstance?.screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
     const origin = position || (center ? { x: center.x - 156, y: center.y - 180 } : { x: 120, y: 140 })
     const copies: WorkflowNode[] = createPastedMediaNodes(clipboard, origin, () => id('media-copy'), new Date().toLocaleString('zh-CN'))
     setNodes((current) => {
       const next: WorkflowNode[] = current.map((node) => ({ ...node, selected: false }))
       for (const copy of copies) {
-        const freePosition = findFreeWorkflowNodePosition(copy.position, getWorkflowNodeSize(copy), next)
+        const freePosition = findFreeWorkflowNodePosition(copy.position, getWorkflowNodeSize(copy), next, besideNodeId ? 'right' : 'nearby')
         next.push({ ...copy, position: freePosition })
       }
       return next
@@ -4680,8 +4882,23 @@ export default function App() {
     setSelectedNodeId(copies.at(-1)?.id || null)
     setContextMenu(null)
     markDirty()
-    window.requestAnimationFrame(() => void flowInstance?.fitView({ nodes: copies, padding: 0.3, maxZoom: 1, duration: 240 }))
+    const framedNodes = besideNodeId ? [{ id: besideNodeId }, ...copies] : copies
+    window.requestAnimationFrame(() => void flowInstance?.fitView({ nodes: framedNodes, padding: 0.3, maxZoom: 1, duration: 240 }))
   }, [flowInstance, markDirty, setNodes])
+
+  function copyVersionToCanvas(nodeId: string, index: number) {
+    const source = nodes.find(node => node.id === nodeId)
+    const version = versionsByNode.get(nodeId)?.items[index]
+    if (!source || !version || source.data.status === 'generating') return
+    const sourceName = `版本 ${index + 1} · ${source.data.sourceName || source.data.title}`
+    const clipboard = createCanvasMediaClipboard([{
+      ...source, data: { ...source.data, ...versionCopyFields(version), sourceName },
+    }])
+    if (!clipboard) return
+    const { x, y } = getAbsoluteNodePosition(source, nodes)
+    const right = x + getWorkflowNodeSize(source).width
+    pasteNodeResults(clipboard, { x: right + 76, y }, source.id)
+  }
 
   function handleAltMediaDragStart(event: MouseEvent | TouchEvent, node: WorkflowNode, draggedNodes: WorkflowNode[]) {
     activeAltMediaDrag = null
@@ -4689,6 +4906,7 @@ export default function App() {
 
     const clipboard = createCanvasMediaClipboard(draggedNodes.map((item) => ({
       ...item,
+      data: viewedMediaData(item),
       position: getAbsoluteNodePosition(item, nodes),
     })))
     if (!clipboard?.items.some((item) => item.sourceId === node.id)) return
@@ -4745,6 +4963,9 @@ export default function App() {
   }
 
   const nodesWithActions = nodes.map((node) => {
+    const resultVersions = versionsByNode.get(node.id)
+    const displayed = resultVersions?.items[resultVersions.viewedIndex]
+    const displayedUrl = displayed?.url ?? node.data.videoUrl ?? node.data.imageUrl
     const incomingEdges = edges.filter((edge) => edge.target === node.id)
     const imageInputEdges = incomingEdges.filter(
       (edge) => isImageInputHandle(edge.targetHandle) || (
@@ -4780,6 +5001,7 @@ export default function App() {
         ...node.data,
         apiMode: apiConfig.mode,
         generationPanelOpen: selectedNodeId === node.id,
+        referenceSizeInputUrl: node.data.followReferenceSize ? referenceSizeInputUrl(node.id, nodes, incomingEdges) : undefined,
         onEnsureGenerationPanelVisible: ensureGenerationPanelVisible,
         generationModelOptions: node.data.kind === 'video' ? apiMartVideoModels : imageGenerationModelOptions,
         imageResolutionOptions: apiConfig.mode === 'apimart' ? findApiMartModel(node.data.model || apiConfig.model).resolutions : apiConfig.mode === 'change2pro' && change2ProSupportsImageSize(apiConfig.model) ? change2ProImageSizes : [],
@@ -4799,9 +5021,15 @@ export default function App() {
         outputConnected: edges.some((edge) => edge.source === node.id),
         memberCount: node.data.kind === 'group' ? nodes.filter((item) => item.parentId === node.id).length : undefined,
         onDelete: deleteNode,
-        onDownload: downloadNodeImage,
+        onDownload: downloadNodeMedia,
+        resultVersions,
+        onViewVersion: viewVersion,
+        onCopyVersion: copyVersionToCanvas,
+        onUseVersion: useVersionAsOutput,
+        onResultVideoDuration: rememberResultVideoDuration,
+        onPreviewResult: setResultPreview,
         onCopyResult: (nodeId: string) => void copyNodeResults([nodeId]),
-        resultCopied: mediaClipboard?.items.some((item) => item.sourceId === node.id),
+        resultCopied: mediaClipboard?.items.some(item => item.sourceId === node.id && (item.data.videoUrl || item.data.imageUrl) === displayedUrl),
         onRevealImage: (nodeId: string) => void revealNodeImage(nodeId),
         onReplaceImage: replaceReferenceImage,
         onReplaceVideo: (nodeId: string, file: File) => void replaceReferenceVideo(nodeId, file),
@@ -4851,6 +5079,7 @@ export default function App() {
   )
 
   async function generateImageInNode(nodeId: string) {
+    const project = generationProjectRef.current
     const node = nodes.find((item) => item.id === nodeId)
     if (!node || node.data.kind !== 'image') return
 
@@ -4886,7 +5115,13 @@ export default function App() {
       return
     }
 
-    const outputSize = node.data.size || apiConfig.size || defaultApiConfig.size
+    const followsReference = node.data.followReferenceSize === true
+    const sizeSource = followsReference ? referenceSizeInputUrl(nodeId, nodes, edges) : undefined
+    if (followsReference && !sizeSource) {
+      setToast('请先将参考图连接到 Image 1，再使用 Reference Size。')
+      return
+    }
+    let outputSize = node.data.size || apiConfig.size || defaultApiConfig.size
     const imageModel = apiConfig.mode === 'apimart'
       ? findApiMartModel(node.data.model || apiConfig.model)
       : null
@@ -4929,6 +5164,12 @@ export default function App() {
     })
 
     try {
+      const reference = sizeSource ? await readReferenceDimensions(sizeSource) : undefined
+      if (project !== generationProjectRef.current) return
+      if (reference) {
+        outputSize = `${reference.width}x${reference.height}`
+        configForNode.size = referenceRequestSize(configForNode, reference.width, reference.height)
+      }
       const orderedPrompt = promptWithReferenceImageOrder(compiledPrompt, referenceImageUrls.length)
       const connectedLightDirection = incomingInputs
         .filter(
@@ -4942,7 +5183,10 @@ export default function App() {
         orderedPrompt,
         ownLightDirection.enabled ? ownLightDirection : connectedLightDirection,
       )
-      const imageUrl = await requestGeneratedImage(lightAdjustedPrompt, configForNode, referenceImageUrls)
+      const generatedUrl = await requestGeneratedImage(lightAdjustedPrompt, configForNode, referenceImageUrls)
+      if (project !== generationProjectRef.current) return
+      const imageUrl = reference ? await fitImageToExactSize(generatedUrl, reference.width, reference.height, 'cover') : generatedUrl
+      if (project !== generationProjectRef.current) return
       updateNodeData(nodeId, {
         imageUrl,
         status: 'done',
@@ -4961,7 +5205,7 @@ export default function App() {
           imageUrl,
           status: '成功',
         },
-        ...current,
+        ...includeCurrentResults(current, [node]),
       ])
       const referenceSummary = referenceImageUrls.length > 1 ? `，已按 Image 1–${referenceImageUrls.length} 顺序读取参考图` : ''
       setToast(
@@ -4970,6 +5214,7 @@ export default function App() {
           : `已在图像框内生成 ${outputSize} 图像${referenceSummary}。`,
       )
     } catch (error) {
+      if (project !== generationProjectRef.current) return
       const message = error instanceof Error ? error.message : '生成失败'
       updateNodeData(nodeId, { status: 'error', error: message })
       setHistory((current) => [
@@ -4985,11 +5230,12 @@ export default function App() {
       ])
       setToast(message)
     } finally {
-      setIsGenerating(false)
+      if (project === generationProjectRef.current) setIsGenerating(false)
     }
   }
 
   async function generateVideoInNode(nodeId: string) {
+    const project = generationProjectRef.current
     const node = nodes.find((item) => item.id === nodeId)
     if (!node || node.data.kind !== 'video') return
 
@@ -5124,6 +5370,7 @@ export default function App() {
         referenceVideoUrls.length,
       )
       const videoUrl = await requestGeneratedVideo(orderedPrompt, configForNode, referenceImageUrls, referenceVideoUrls)
+      if (project !== generationProjectRef.current) return
       updateNodeData(nodeId, {
         videoUrl,
         status: 'done',
@@ -5132,6 +5379,7 @@ export default function App() {
         size: outputSize,
         videoResolution,
         videoDuration,
+        videoDurationSeconds: videoDuration,
       })
       setHistory((current) => [
         {
@@ -5142,9 +5390,10 @@ export default function App() {
           createdAt,
           mediaType: 'video',
           videoUrl,
+          videoDurationSeconds: videoDuration,
           status: '成功',
         },
-        ...current,
+        ...includeCurrentResults(current, [node]),
       ])
       const referenceSummary = referenceImageUrls.length
         ? `，已读取 ${referenceImageUrls.length} 张参考图`
@@ -5154,6 +5403,7 @@ export default function App() {
         : ''
       setToast(`已使用 ${videoModel.label} 生成 ${videoDuration} 秒·${videoResolution} 视频${referenceSummary}${referenceVideoSummary}。`)
     } catch (error) {
+      if (project !== generationProjectRef.current) return
       const message = error instanceof Error ? error.message : '视频生成失败'
       updateNodeData(nodeId, { status: 'error', error: message })
       setHistory((current) => [
@@ -5170,7 +5420,7 @@ export default function App() {
       ])
       setToast(message)
     } finally {
-      setIsGenerating(false)
+      if (project === generationProjectRef.current) setIsGenerating(false)
     }
   }
 
@@ -5283,7 +5533,7 @@ export default function App() {
     const createdAt = new Date().toLocaleString('zh-CN')
     const sourcePosition = getAbsoluteNodePosition(sourceNode, nodes)
     const position = {
-      x: sourcePosition.x + 410,
+      x: sourcePosition.x + Math.max(410, getWorkflowNodeSize(sourceNode).width + 80),
       y: sourcePosition.y + 36,
     }
     const resultNode: WorkflowNode = {
@@ -5426,7 +5676,6 @@ export default function App() {
     const sourceNode = nodes.find((item) => item.id === session.nodeId)
     if (!sourceNode?.data.imageUrl) throw new Error('原图已不在画布中，请重新打开多角度编辑器。')
 
-    const sourcePosition = getAbsoluteNodePosition(sourceNode, nodes)
     const outputSize = `${result.sourceWidth}x${result.sourceHeight}`
     const chosenModel = imageGenerationModelOptions.find((model) => model.id === result.modelId)
     if (!chosenModel) throw new Error('所选生图模型已不可用，请重新选择。')
@@ -5443,11 +5692,7 @@ export default function App() {
     const resultNode: WorkflowNode = {
       id: resultNodeId,
       type: 'workflow',
-      position: findFreeWorkflowNodePosition(
-        { x: sourcePosition.x + 430, y: sourcePosition.y + 20 },
-        { width: 330, height: 500 },
-        nodes,
-      ),
+      position: findImageResultPosition(sourceNode, nodes, { width: result.sourceWidth, height: result.sourceHeight }, 500, 20),
       selected: true,
       data: {
         kind: 'image',
@@ -5500,6 +5745,7 @@ export default function App() {
   }
 
   async function generateOutpaintInNode(nodeId: string) {
+    const project = generationProjectRef.current
     const node = nodes.find((item) => item.id === nodeId)
     if (!node || node.data.kind !== 'outpaint') return
 
@@ -5521,6 +5767,7 @@ export default function App() {
     if (imageSourceNode?.data.imageUrl && imageSourceNode.data.imageUrl !== node.data.sourceImageUrl) {
       try {
         const sourceImage = await loadCanvasImage(await imageAsDataUrl(imageSourceNode.data.imageUrl))
+        if (project !== generationProjectRef.current) return
         const sourceSize = fitSourceForOutpaint(sourceImage.naturalWidth, sourceImage.naturalHeight)
         sourceWidth = sourceSize.width
         sourceHeight = sourceSize.height
@@ -5538,6 +5785,7 @@ export default function App() {
           error: undefined,
         })
       } catch {
+        if (project !== generationProjectRef.current) return
         updateNodeData(nodeId, { status: 'error', error: '无法读取连接图片的尺寸，请重新连接图片。' })
         return
       }
@@ -5570,6 +5818,7 @@ export default function App() {
 
     try {
       const prepared = await prepareOutpaintInputs(sourceImageUrl, sourceWidth, sourceHeight, outpaintInsets)
+      if (project !== generationProjectRef.current) return
       const generatedImageUrl = await requestGeneratedImage(
         generationPrompt,
         configForNode,
@@ -5583,6 +5832,7 @@ export default function App() {
         sourceHeight,
         outpaintInsets,
       )
+      if (project !== generationProjectRef.current) return
       updateNodeData(nodeId, {
         imageUrl,
         sourceImageUrl,
@@ -5601,7 +5851,7 @@ export default function App() {
           imageUrl,
           status: '成功',
         },
-        ...current,
+        ...includeCurrentResults(current, [node]),
       ])
       setToast(
         apiConfig.mode === 'mock'
@@ -5609,6 +5859,7 @@ export default function App() {
           : `扩图完成：${target.width} × ${target.height}px，原图区域已保护。`,
       )
     } catch (error) {
+      if (project !== generationProjectRef.current) return
       const message = error instanceof Error ? error.message : '扩图生成失败'
       updateNodeData(nodeId, { status: 'error', error: message })
       setHistory((current) => [
@@ -5624,7 +5875,7 @@ export default function App() {
       ])
       setToast(message)
     } finally {
-      setIsGenerating(false)
+      if (project === generationProjectRef.current) setIsGenerating(false)
     }
   }
 
@@ -5935,14 +6186,7 @@ export default function App() {
     try {
       setToast(targetHandle ? '正在保存项目包...' : '正在整理项目，请选择保存文件夹...')
       sessionId = await startProjectPackage()
-      const canvasSnapshot = flowInstance?.toObject()
-      const project = await buildPackageProject(
-        sessionId,
-        projectName,
-        (canvasSnapshot?.nodes as WorkflowNode[] | undefined) ?? nodes,
-        canvasSnapshot?.edges ?? edges,
-        history,
-      )
+      const project = await buildPackageProject(sessionId, projectName, nodes, edges, history)
       const packageName = projectPackageFileName(projectName)
       const downloadQuery = targetHandle ? '&download=1' : ''
       const response = await fetch(
@@ -6000,14 +6244,7 @@ export default function App() {
     try {
       setToast('正在整理项目图片...')
       sessionId = await startProjectPackage()
-      const canvasSnapshot = flowInstance?.toObject()
-      const project = await buildPackageProject(
-        sessionId,
-        projectName,
-        (canvasSnapshot?.nodes as WorkflowNode[] | undefined) ?? nodes,
-        canvasSnapshot?.edges ?? edges,
-        history,
-      )
+      const project = await buildPackageProject(sessionId, projectName, nodes, edges, history)
       const packageName = projectPackageFileName(projectName)
       const response = await fetch(
         `/api/projects/package/finish?sessionId=${encodeURIComponent(sessionId)}&filename=${encodeURIComponent(packageName)}`,
@@ -6045,8 +6282,12 @@ export default function App() {
       await saveModel3DScenes(project.model3DScenes)
     }
     setProjectName(project.projectName)
+    generationProjectRef.current++
+    setIsGenerating(false)
     for (const controller of activeUpscaleRunsRef.current.values()) controller.abort()
     activeUpscaleRunsRef.current.clear()
+    setResultPreview(null)
+    setVersionChoices(new Map())
     setUpscaleSession(null)
     setUpscaleProgress({})
     setNodes(project.nodes)
@@ -6207,7 +6448,7 @@ export default function App() {
     const ignoreClipboardEvent = (event: ClipboardEvent) => {
       const target = event.target instanceof Element ? event.target : null
       return event.defaultPrevented || Boolean(target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) ||
-        Boolean(showSettings || showModelStudio || sketchSession || elementEditSession || multiAngleSession || layerSplitSession || upscaleSession || showHistoryPanel || historyMediaPreview || groupDialog || lightDirectionNodeId)
+        Boolean(showSettings || showModelStudio || sketchSession || elementEditSession || multiAngleSession || layerSplitSession || upscaleSession || resultPreview || groupDialog || lightDirectionNodeId)
     }
     const handleCopyMedia = (event: ClipboardEvent) => {
       if (ignoreClipboardEvent(event) || window.getSelection()?.toString()) return
@@ -6287,7 +6528,7 @@ export default function App() {
     elementEditSession,
     flowInstance,
     groupDialog,
-    historyMediaPreview,
+    resultPreview,
     lightDirectionNodeId,
     markDirty,
     multiAngleSession,
@@ -6296,7 +6537,6 @@ export default function App() {
     nodes.length,
     setNodes,
     pasteNodeResults,
-    showHistoryPanel,
     showModelStudio,
     sketchSession,
     showSettings,
@@ -6327,7 +6567,8 @@ export default function App() {
     const createdAt = new Date().toLocaleString('zh-CN')
     const size = `${sketch.width}x${sketch.height}`
     const referenceSize = { width: 312, height: Math.ceil(288 * sketch.height / sketch.width + 120) }
-    const outputNodeSize = { width: 330, height: Math.ceil(306 * sketch.height / sketch.width + 450) }
+    const outputWidth = generationCardWidth(sketch)
+    const outputNodeSize = { width: outputWidth, height: Math.ceil((outputWidth - 24) * sketch.height / sketch.width + 450) }
     const center = flowInstance?.screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 }) || { x: 200, y: 180 }
     const position = source ? getAbsoluteNodePosition(source, nodes) : findFreeWorkflowNodePosition({ x: center.x - 156, y: center.y - 180 }, referenceSize, nodes)
     const sourceData: WorkflowNodeData = { ...(source?.data || {}), kind: 'reference', title: '分层手绘参考图', sourceName: '分层手绘参考图.png', status: 'done', model: '手绘画板', size, sketch, imageUrl, createdAt }
@@ -6974,157 +7215,12 @@ export default function App() {
               </button>
             </span>
           </div>
-          <div className={`history-popover ${showHistoryPanel ? 'expanded' : ''}`}>
-            <button
-              className={`history-toggle ${showHistoryPanel ? 'active' : ''}`}
-              type="button"
-              onClick={() => setShowHistoryPanel((current) => !current)}
-              title={showHistoryPanel ? '收起生成历史' : '生成历史'}
-              aria-label={showHistoryPanel ? '收起生成历史' : '展开生成历史'}
-              aria-expanded={showHistoryPanel}
-              aria-controls="generation-history-panel"
-            >
-              <History size={15} />
-              <span className="history-toggle-label">生成历史</span>
-              {showHistoryPanel && <X className="history-toggle-close" size={15} />}
-            </button>
-            {showHistoryPanel && (
-              <div className="history-menu" id="generation-history-panel">
-                {history.length ? (
-                  <div className="history-grid">
-                    {history.slice(0, 12).map((item, index) => {
-                      const sourceNode = nodes.find((node) => node.id === item.id)
-                      const isVideoHistory = item.mediaType === 'video' || Boolean(item.videoUrl)
-                      const imageUrl = item.imageUrl || (!isVideoHistory && item.status === '成功' ? sourceNode?.data.imageUrl : undefined)
-                      const videoUrl = item.videoUrl || (isVideoHistory && item.status === '成功' ? sourceNode?.data.videoUrl : undefined)
-                      const mediaUrl = isVideoHistory ? videoUrl : imageUrl
-                      const openMediaPreview = () => {
-                        if (!mediaUrl) return
-                        setHistoryImageNaturalSize(null)
-                        setHistoryMediaPreview({
-                          mediaType: isVideoHistory ? 'video' : 'image',
-                          mediaUrl,
-                          prompt: item.prompt,
-                          createdAt: item.createdAt,
-                        })
-                      }
-                      return (
-                        <div className="history-card" key={`${item.id}-${item.createdAt}-${index}`}>
-                          <div className="history-thumb-wrap">
-                            <button
-                              className="history-thumb"
-                              type="button"
-                              onClick={() => isVideoHistory && mediaUrl ? openMediaPreview() : setPrompt(item.prompt)}
-                              title={isVideoHistory && mediaUrl ? '播放视频' : '使用这条提示词'}
-                            >
-                              {videoUrl ? (
-                                <video src={videoUrl} aria-label="生成历史视频缩略图" muted playsInline preload="metadata" />
-                              ) : imageUrl ? (
-                                <img src={imageUrl} alt="生成历史缩略图" />
-                              ) : isVideoHistory ? (
-                                <Video size={22} />
-                              ) : (
-                                <ImageIcon size={22} />
-                              )}
-                            </button>
-                            {mediaUrl && (
-                              <button
-                                className="history-preview-button"
-                                type="button"
-                                onClick={openMediaPreview}
-                                title={isVideoHistory ? '播放视频' : '查看大图'}
-                                aria-label={isVideoHistory ? '播放生成历史视频' : '查看生成历史大图'}
-                              >
-                                <Eye size={17} />
-                              </button>
-                            )}
-                          </div>
-                          <div className="history-meta">
-                            <span className={item.status === '成功' ? 'success' : 'failed'}>
-                              {isVideoHistory ? '视频' : '图像'} · {item.status}
-                            </span>
-                            <strong>{item.prompt}</strong>
-                            <small>{item.createdAt}</small>
-                          </div>
-                          <button
-                            className="history-folder"
-                            type="button"
-                            onClick={() => void downloadHistoryMedia(item)}
-                            title={isVideoHistory ? '下载视频' : '下载图像'}
-                            aria-label={isVideoHistory ? '下载生成历史视频' : '下载生成历史图像'}
-                            disabled={!mediaUrl}
-                          >
-                            <Download size={15} />
-                          </button>
-                        </div>
-                      )
-                    })}
-                  </div>
-                ) : (
-                  <div className="history-empty">生成后会在这里显示缩略图。</div>
-                )}
-              </div>
-            )}
-          </div>
-          {historyMediaPreview && (
-            <div
-              className="history-image-backdrop"
-              role="presentation"
-              onMouseDown={(event) => {
-                if (event.target === event.currentTarget) setHistoryMediaPreview(null)
-              }}
-              onContextMenu={(event) => event.stopPropagation()}
-            >
-              <section
-                className={`history-image-modal ${
-                  historyMediaPreview.mediaType === 'video'
-                    ? 'is-video'
-                    : historyImageNaturalSize
-                    ? historyImageNaturalSize.width > historyImageNaturalSize.height
-                      ? 'is-landscape'
-                      : historyImageNaturalSize.width < historyImageNaturalSize.height
-                        ? 'is-portrait'
-                        : 'is-square'
-                    : ''
-                }`}
-                role="dialog"
-                aria-modal="true"
-                aria-label={historyMediaPreview.mediaType === 'video' ? '生成历史视频预览' : '生成历史大图预览'}
-                onMouseDown={(event) => event.stopPropagation()}
-              >
-                <div className="history-image-head">
-                  <div>
-                    <strong>{historyMediaPreview.mediaType === 'video' ? '视频生成历史' : '图像生成历史'}</strong>
-                    <small>{historyMediaPreview.createdAt}</small>
-                  </div>
-                  <button type="button" onClick={() => setHistoryMediaPreview(null)} title="关闭" aria-label="关闭历史预览">
-                    <X size={18} />
-                  </button>
-                </div>
-                <div className="history-image-stage">
-                  {historyMediaPreview.mediaType === 'video' ? (
-                    <video src={historyMediaPreview.mediaUrl} controls playsInline preload="metadata" />
-                  ) : (
-                    <img
-                      src={historyMediaPreview.mediaUrl}
-                      alt="生成历史大图"
-                      onLoad={(event) => {
-                        const { naturalWidth, naturalHeight } = event.currentTarget
-                        if (naturalWidth > 0 && naturalHeight > 0) {
-                          setHistoryImageNaturalSize({ width: naturalWidth, height: naturalHeight })
-                        }
-                      }}
-                    />
-                  )}
-                </div>
-                <div className="history-image-caption" title={historyMediaPreview.prompt}>
-                  {historyMediaPreview.prompt}
-                </div>
-              </section>
-            </div>
-          )}
         </div>
       </section>
+
+      {resultPreview && (
+        <ResultMediaPreview media={resultPreview} versions={previewVersions} onViewVersion={viewAdjacentResult} onDismiss={() => setResultPreview(null)} />
+      )}
 
       {lightDirectionNode && (
         <div

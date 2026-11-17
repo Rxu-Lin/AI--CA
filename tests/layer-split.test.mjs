@@ -191,7 +191,7 @@ test('Run creates a connected result with exact source dimensions; failures reta
     AbortController, Map, layerSplitSession: { nodeId: 'original' },
     nodes: [{ id: 'original', position: { x: 0, y: 0 }, data: { imageUrl: '/original.png', title: '原图' } }], edges: [],
     cacheCanvasImage: async () => '/cache.png', layerRequest: async () => ({ requestId: job.requestId }),
-    getAbsoluteNodePosition: node => node.position, findFreeWorkflowNodePosition: point => point,
+    findImageResultPosition: node => node.position,
     id: prefix => `${prefix}-${++index}`, MarkerType: { ArrowClosed: 'arrow' }, workflowEdgeColor: '#aaa', imageInputHandlePrefix: 'image-',
     activeLayerRunsRef: { current: new Map() },
     collectLayerSplit: async () => { throw new Error('Network failed; resume request') },

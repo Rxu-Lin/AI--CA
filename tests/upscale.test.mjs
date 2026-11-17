@@ -143,7 +143,7 @@ test('canvas submission creates one connected result, retains original and store
   const context = functionsFrom('src/App.tsx', ['submitUpscale', 'cleanNode', 'cleanEdge', 'buildPackageProject'], {
     nodes, upscaleSession: { nodeId: source.id }, upscaleDimensions, upscaleModes,
     cacheCanvasImage: async () => '/cached-original.png', upscaleRequest: async () => ({ requestId: job.requestId, width: 30, height: 18 }),
-    id: prefix => `${prefix}-1`, getAbsoluteNodePosition: node => node.position, findFreeWorkflowNodePosition: position => position,
+    id: prefix => `${prefix}-1`, findImageResultPosition: node => node.position,
     setNodes: fn => { nodes = fn(nodes) }, setEdges: fn => { edges = fn(edges) }, setSelectedNodeId: value => { selected = value },
     setUpscaleSession: value => { session = value }, markDirty: () => { dirty++ }, finishUpscale: (id, value) => { run = { id, job: value } },
     MarkerType: { ArrowClosed: 'arrowclosed' }, workflowEdgeColor: '#ccc', imageInputHandlePrefix: 'image-', window: { setTimeout() {} },

@@ -17,7 +17,7 @@
 }
 
 .canvas-app :is(.settings-modal, .light-direction-modal, .group-name-modal, .sketch-studio,
-  .element-edit-studio, .model3d-studio, .multi-angle-studio, .history-image-modal,
+  .element-edit-studio, .model3d-studio, .multi-angle-studio,
   .model3d-optimize-dialog) {
   border: var(--glass-frame-width) solid transparent;
   border-radius: var(--panel-radius);
@@ -29,7 +29,7 @@
 
 .canvas-app :is(.workflow-node, .floating-prompt-control, .header-actions,
   .selection-toolbar, .image-context-actions, .canvas-context-menu, .react-flow__controls,
-  .prompt-library-panel, .quick-workflow-panel, .history-popover,
+  .prompt-library-panel, .quick-workflow-panel,
   .node-model-menu, .multi-angle-model-menu, .api-mode-menu, .prompt-mention-menu) {
   border: var(--glass-frame-width) solid transparent;
   background: var(--glass-mist) padding-box, var(--glass-fill) padding-box, var(--glass-edge) border-box;
@@ -38,13 +38,13 @@
 
 .canvas-app :is(.floating-prompt-control, .header-actions, .selection-toolbar,
   .image-context-actions, .canvas-context-menu, .prompt-library-panel,
-  .quick-workflow-panel, .history-popover) {
+  .quick-workflow-panel) {
   backdrop-filter: blur(22px) saturate(0);
   -webkit-backdrop-filter: blur(22px) saturate(0);
 }
 
 .canvas-app :is(.workflow-node, .floating-prompt-control) { border-radius: 20px; }
-.canvas-app :is(.prompt-library-panel, .quick-workflow-panel, .history-popover.expanded,
+.canvas-app :is(.prompt-library-panel, .quick-workflow-panel,
   .node-model-menu, .multi-angle-model-menu, .api-mode-menu, .canvas-context-menu) { border-radius: 16px; }
 .canvas-app :is(.header-actions, .selection-toolbar, .image-context-actions) { border-radius: 13px; }
 .canvas-app :is(.workflow-node.selected, .floating-prompt-control:focus-within) {
@@ -88,7 +88,7 @@
 .canvas-app :is(.multi-angle-orbit-stage, .multi-angle-angle-card, .multi-angle-prompt-editor,
   .sketch-layer, .element-edit-output-info span, .element-edit-marker-list > div,
   .model3d-library, .model3d-parametric-panel, .model3d-parametric-create,
-  .quick-workflow-card, .prompt-library-card, .history-card, .outpaint-editor) {
+  .quick-workflow-card, .prompt-library-card, .outpaint-editor) {
   border: var(--glass-frame-width) solid transparent;
   background: var(--glass-control-fill) padding-box, var(--glass-edge) border-box;
   box-shadow: var(--glass-control-shadow);
@@ -142,7 +142,7 @@
   .model3d-file-button, .model3d-reset-button, .model3d-save-button,
   .model3d-secondary-button, .model3d-export-button, .model3d-optimize-start,
   .modal-foot button, .group-name-actions button, .light-direction-modal-actions button,
-  .prompt-copy-button, .history-folder) {
+  .prompt-copy-button) {
   border: var(--glass-frame-width) solid transparent;
   border-radius: var(--control-radius);
   background: var(--glass-control-fill) padding-box, var(--glass-edge) border-box;
